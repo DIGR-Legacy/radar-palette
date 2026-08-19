@@ -24,9 +24,20 @@ Reflectivity is interpolated in dBZ, not linear Z.
 
 Status
 ------
-Scaffolding only: the implementation lands in follow-up pull requests.
+Time reconstruction (:mod:`radar_palette.advection.timing`) is implemented. The
+motion-estimation and reconstruction operators land in follow-up pull requests.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from radar_palette.advection.timing import (
+    apply_interpolated_time,
+    interpolate_ray_times,
+    volume_reference_time,
+)
+
+__all__ = [
+    "apply_interpolated_time",
+    "interpolate_ray_times",
+    "volume_reference_time",
+]
