@@ -50,9 +50,14 @@ python -m build     # build sdist + wheel
 ```
 
 Versioning is handled by `setuptools-scm` from git tags — there is no version
-string to edit by hand. No release has been tagged yet, so a build from a clone
-reports a development version derived from the commit (`0.1.dev<N>+g<sha>`); a
-build from a source archive with no git metadata falls back to `0.0.0`.
+string to edit by hand. No release has been tagged yet.
+
+When `setuptools-scm` cannot derive a version — no tags, no git metadata (a source
+archive), or a checkout it declines to inspect — the build falls back to the
+`fallback_version` configured in `pyproject.toml`, currently `0.0.0`. That is what
+builds report today, so do not treat a `0.0.0` wheel as a released artifact. Once
+a `vX.Y.Z` tag exists on `main`, tagged builds carry that version and untagged
+commits after it carry a `setuptools-scm`-derived development version.
 
 ## Conventions
 

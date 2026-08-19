@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "radar-palette"
 description = "Advective interpolation and spectral (FFT) gridding for weather radar volumes"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 authors = [
@@ -29,7 +29,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -42,6 +41,19 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "arm_pyart>=2.0",
+    # Declared directly because radar_palette imports them directly, rather than
+    # relied on transitively through arm_pyart: a resolver is free to satisfy
+    # arm_pyart differently, and an undeclared import fails at call time rather
+    # than at install. The xarray floor is where xarray.DataTree landed (it was a
+    # separate datatree package before); the xradar floor is where the cfradial
+    # readers this package calls stabilised.
+    "xarray>=2024.10.0",
+    # xradar 0.12.0 is the first release requiring Python >= 3.11, which is why
+    # requires-python matches it. Py-ART made the same move: arm_pyart 2.2.1
+    # dropped 3.10, so a 3.10 environment can only resolve arm_pyart 2.2.0 /
+    # xradar 0.11.1 -- an older stack than the one this package is tested on.
+    "xradar>=0.12.0",
+    "netCDF4>=1.6",
 ]
 
 [project.optional-dependencies]
@@ -97,7 +109,7 @@ filterwarnings = ["error::DeprecationWarning:radar_palette.*"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]

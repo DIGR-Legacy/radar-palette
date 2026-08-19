@@ -6,7 +6,7 @@ get the expected family back, with the default mirroring the input.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -24,7 +24,7 @@ from radar_palette.io import (  # noqa: E402
 )
 from radar_palette.testing import assign_scan_times, make_empty_ppi_volume  # noqa: E402
 
-VOLUME_START = datetime(2011, 5, 20, 11, 34, 0, tzinfo=timezone.utc)
+VOLUME_START = datetime(2011, 5, 20, 11, 34, 0, tzinfo=UTC)
 SECONDS_BETWEEN_VOLUMES = 420.0
 GRID_SHAPE = (3, 11, 11)
 GRID_LIMITS = ((0.0, 2000.0), (-5000.0, 5000.0), (-5000.0, 5000.0))

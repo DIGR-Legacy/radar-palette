@@ -8,7 +8,7 @@ points at the time code rather than at a data-dependent side effect.
 
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import UTC
 
 import numpy as np
 import pyart
@@ -102,11 +102,11 @@ def assign_scan_times(
         ``radar``, to allow use as an expression.
     """
     if volume_start.tzinfo is None:
-        volume_start = volume_start.replace(tzinfo=timezone.utc)
+        volume_start = volume_start.replace(tzinfo=UTC)
     if epoch is None:
         epoch = volume_start
     elif epoch.tzinfo is None:
-        epoch = epoch.replace(tzinfo=timezone.utc)
+        epoch = epoch.replace(tzinfo=UTC)
 
     ray_offsets_from_start = np.arange(radar.nrays, dtype="float64") * seconds_per_ray
     units = epoch.strftime(_CF_TIME_UNIT_FORMAT)

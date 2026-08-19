@@ -9,7 +9,7 @@ rather than to optical flow or sampling.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -22,7 +22,7 @@ from radar_palette.advection.timing import (
 )
 from radar_palette.testing import assign_scan_times, make_empty_ppi_volume
 
-VOLUME_START = datetime(2011, 5, 20, 11, 34, 0, tzinfo=timezone.utc)
+VOLUME_START = datetime(2011, 5, 20, 11, 34, 0, tzinfo=UTC)
 SECONDS_BETWEEN_VOLUMES = 420.0
 
 
@@ -35,9 +35,7 @@ def absolute_ray_times(time_dict):
         only_use_cftime_datetimes=False,
         only_use_python_datetimes=True,
     )
-    return np.array(
-        [moment.replace(tzinfo=timezone.utc) for moment in np.atleast_1d(decoded)]
-    )
+    return np.array([moment.replace(tzinfo=UTC) for moment in np.atleast_1d(decoded)])
 
 
 def elapsed_seconds(later, earlier):
@@ -163,7 +161,7 @@ class TestInterpolateRayTimes:
                 interpolated["units"],
                 only_use_cftime_datetimes=False,
                 only_use_python_datetimes=True,
-            ).replace(tzinfo=timezone.utc),
+            ).replace(tzinfo=UTC),
         )
         assert abs(offset) == pytest.approx(SECONDS_BETWEEN_VOLUMES / 2, abs=1e-3)
 
@@ -177,7 +175,7 @@ class TestInterpolateRayTimes:
             interpolated["units"],
             only_use_cftime_datetimes=False,
             only_use_python_datetimes=True,
-        ).replace(tzinfo=timezone.utc)
+        ).replace(tzinfo=UTC)
         advance = elapsed_seconds(mean_moment, volume_reference_time(early_volume))
         assert advance == pytest.approx(alpha * SECONDS_BETWEEN_VOLUMES, abs=1e-3)
 
@@ -208,7 +206,7 @@ class TestInterpolateRayTimes:
             interpolated["units"],
             only_use_cftime_datetimes=False,
             only_use_python_datetimes=True,
-        ).replace(tzinfo=timezone.utc)
+        ).replace(tzinfo=UTC)
         advance = elapsed_seconds(mean_moment, volume_reference_time(early))
         assert advance == pytest.approx(SECONDS_BETWEEN_VOLUMES / 2, abs=1e-3)
 
@@ -236,7 +234,7 @@ class TestInterpolateRayTimes:
             interpolated["units"],
             only_use_cftime_datetimes=False,
             only_use_python_datetimes=True,
-        ).replace(tzinfo=timezone.utc)
+        ).replace(tzinfo=UTC)
         advance = elapsed_seconds(mean_moment, volume_reference_time(early_volume))
         assert advance == pytest.approx(1.5 * SECONDS_BETWEEN_VOLUMES, abs=1e-3)
 

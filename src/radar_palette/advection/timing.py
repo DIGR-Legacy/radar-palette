@@ -30,7 +30,7 @@ volumes come from separate files.
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 
 import numpy as np
 from netCDF4 import date2num, num2date
@@ -76,7 +76,7 @@ def _decode_ray_times(time_dict):
     )
     return np.array(
         [
-            moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+            moment if moment.tzinfo else moment.replace(tzinfo=UTC)
             for moment in np.atleast_1d(decoded)
         ]
     )
@@ -182,7 +182,7 @@ def interpolate_ray_times(radar_early, radar_late, alpha):
 
 def _format_iso_timestamp(moment):
     """Render a datetime as a CF/cfradial ISO-8601 UTC timestamp string."""
-    return moment.astimezone(timezone.utc).strftime(_ISO_TIMESTAMP_FORMAT)
+    return moment.astimezone(UTC).strftime(_ISO_TIMESTAMP_FORMAT)
 
 
 def apply_interpolated_time(radar_out, radar_early, radar_late, alpha):
