@@ -35,6 +35,10 @@ that everything advertised there is importable.
   / `requires_finufft` markers in `tests/conftest.py` so a minimal install still
   collects a green suite.
 - **Units in docstrings**: always. Metres, seconds, degrees, dBZ.
+- **Geometry**: use `radar_palette.gridding.antenna_to_cartesian_43` and
+  `cartesian_to_antenna_43`, not the Py-ART equivalents, wherever a round trip
+  matters — Py-ART's inverse omits the curvature term (see `CHANGELOG.md`). Note
+  Py-ART's forward transform takes kilometres while its inverse returns metres.
 - **Object flavours**: public entry points accept both Py-ART and xradar objects
   and return the caller's family by default (`output_flavor` overrides). Route
   conversions through `radar_palette.io` and Py-ART's own interoperability layer
