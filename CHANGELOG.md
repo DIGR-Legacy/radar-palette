@@ -8,6 +8,22 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `radar_palette.gridding.evaluator`: `SweepSpectralEvaluator` turns a sampled sweep
+  into a continuous band-limited function, evaluable at arbitrary
+  (range, azimuth). Three azimuth paths chosen by sweep class — exact FFT for a
+  closing full-circle lattice, gap-closing extension for a sector, Kaiser-Bessel
+  NUFFT for non-uniform rays. Range is mirror-extended, never treated as periodic.
+- `radar_palette.gridding.nufft`: Kaiser-Bessel forward/adjoint operator pair with
+  an adjoint-consistency test recorded in the evaluator's report, plus conjugate-
+  gradient solution of the density-weighted normal equations.
+- `radar_palette.gridding.reflectivity`: `to_dbz`, `to_linear`,
+  `looks_like_linear_reflectivity` and `LinearReflectivityError`. The evaluator
+  refuses input that looks like linear Z, because interpolating linear
+  reflectivity across a hard echo edge drove 42.6% of evaluated samples negative in
+  a measured reproduction.
+- `radar_palette.gridding.fill`: `fill_sweep` makes a sweep gap-free by constant,
+  edge-interpolating or band-limited (Gerchberg-Papoulis) fill. All three leave
+  measured samples untouched.
 - `radar_palette.gridding.geometry`: `antenna_to_cartesian_43` and
   `cartesian_to_antenna_43`, forward and exact analytic inverse radar geometry on
   the 4/3 effective earth, in metres. The inverse exists because
@@ -56,6 +72,22 @@ git tags via `setuptools-scm`.
   either object family; by default the advection entry point returns the family it
   was given, and the gridding entry point maps Py-ART input to a `Grid` and xradar
   input to an xarray `Dataset`. `output_flavor` overrides either default.
+
+### Changed
+
+- **Conjugate-gradient refinement of the NUFFT path is now on by default**
+  (`DEFAULT_CG_ITERATIONS = 12`), departing from the research code it was ported
+  from. Convolution gridding computes the adjoint of the sampling operator, not its
+  inverse: on a constant field with ±0.3-spacing azimuth jitter, unrefined gridding
+  reproduces the constant to only 60% relative deviation, scaling with jitter (3.6%
+  at ±0.02, 19% at ±0.1). Twelve iterations bring it to 0.07% for roughly 50% more
+  build time. Pass `n_cg=0` for the unrefined operator.
+- The linear-Z guard tests **magnitude** rather than dynamic range. A max/min ratio
+  is unreliable in both directions — a dBZ field spanning 0–50 has a ratio of 1e5
+  and would be falsely flagged, while linear Z from a 6.8–31.8 dBZ scene has a ratio
+  of only 316 and would be missed. Magnitude separates the cases cleanly. Known
+  blind spot: a linear field peaking below ~23 dBZ stays under the ceiling and is
+  not caught.
 
 ### Fixed
 

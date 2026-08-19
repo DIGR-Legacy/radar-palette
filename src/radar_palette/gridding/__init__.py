@@ -49,23 +49,45 @@ from radar_palette.gridding.census import (
     census_radar,
     census_sweep,
 )
+from radar_palette.gridding.evaluator import (
+    DEFAULT_CG_ITERATIONS,
+    EvalReport,
+    SweepSpectralEvaluator,
+)
+from radar_palette.gridding.fill import fill_sweep
 from radar_palette.gridding.geometry import (
     EARTH_RADIUS_EFFECTIVE_M,
     antenna_to_cartesian_43,
     cartesian_to_antenna_43,
 )
 from radar_palette.gridding.gridder import grid_volume
+from radar_palette.gridding.reflectivity import (
+    DBZ_PHYSICAL_CEILING,
+    LinearReflectivityError,
+    looks_like_linear_reflectivity,
+    to_dbz,
+    to_linear,
+)
 
 __all__ = [
     "AZ_DEV_TOL_FRAC",
+    "DBZ_PHYSICAL_CEILING",
+    "DEFAULT_CG_ITERATIONS",
     "DR_DEV_TOL_FRAC",
     "EARTH_RADIUS_EFFECTIVE_M",
+    "EvalReport",
+    "LinearReflectivityError",
     "SPLIT_CUT_TOL_DEG",
     "SweepClass",
     "SweepGeometry",
+    "SweepSpectralEvaluator",
     "antenna_to_cartesian_43",
     "cartesian_to_antenna_43",
     "census_radar",
     "census_sweep",
+    "fill_sweep",
     "grid_volume",
+    "looks_like_linear_reflectivity",
+    "to_dbz",
+    "to_linear",
 ]

@@ -35,6 +35,16 @@ that everything advertised there is importable.
   / `requires_finufft` markers in `tests/conftest.py` so a minimal install still
   collects a green suite.
 - **Units in docstrings**: always. Metres, seconds, degrees, dBZ.
+- **Reflectivity units**: interpolate in **dBZ**, never linear Z. Linear
+  reflectivity through a band-limited interpolant goes negative at echo edges
+  (42.6% of samples in a measured reproduction), and the negatives become
+  indistinguishable from weak echo on conversion. Note the honest limit: dBZ keeps
+  ringing *representable*, it does not remove it — the same edge overshoots +19.8 dB
+  past the data maximum and -10.6 dB below its minimum.
+- **Adjoint is not inverse**: any new gridding operator that computes an adjoint
+  must either refine it (conjugate gradients on the normal equations) or document
+  the error it leaves. Record an adjoint-consistency test in the report, as
+  `radar_palette.gridding.nufft` does; a smooth-looking output is not evidence.
 - **Geometry**: use `radar_palette.gridding.antenna_to_cartesian_43` and
   `cartesian_to_antenna_43`, not the Py-ART equivalents, wherever a round trip
   matters — Py-ART's inverse omits the curvature term (see `CHANGELOG.md`). Note
