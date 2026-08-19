@@ -8,6 +8,22 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `radar_palette.gridding.geometry`: `antenna_to_cartesian_43` and
+  `cartesian_to_antenna_43`, forward and exact analytic inverse radar geometry on
+  the 4/3 effective earth, in metres. The inverse exists because
+  `pyart.core.cartesian_to_antenna` is not the inverse of Py-ART's own forward
+  transform; see below.
+- `radar_palette.gridding.census`: `census_sweep`, `census_radar`, `SweepGeometry`
+  and `SweepClass` measure a volume's sampling geometry and classify each sweep as
+  `EXACT_UNIFORM_PERIODIC`, `UNIFORM_PARTIAL_SECTOR` or `NON_UNIFORM`, which
+  determines whether a plain FFT is valid on the azimuth axis. Also tags split-cut
+  groups, since NEXRAD VCPs repeat the low tilts and de-duplication is mandatory
+  before vertical interpolation. Accepts either object flavour.
+- Classifier tolerances are public and documented: `AZ_DEV_TOL_FRAC` (0.01),
+  `DR_DEV_TOL_FRAC` (1e-3), `SPLIT_CUT_TOL_DEG` (0.05). The azimuth tolerance is
+  fractional rather than absolute because the worst-case Nyquist error is `pi * f`,
+  independent of ray count.
+
 - `radar_palette.advection.timing`: reconstruction of per-ray acquisition times
   for advection-interpolated volumes (`volume_reference_time`,
   `interpolate_ray_times`, `apply_interpolated_time`). An interpolated volume now
@@ -42,6 +58,15 @@ git tags via `setuptools-scm`.
   input to an xarray `Dataset`. `output_flavor` overrides either default.
 
 ### Fixed
+
+- Documented, with measured values, that `pyart.core.cartesian_to_antenna` is not
+  the inverse of `pyart.core.antenna_to_cartesian`: the forward transform returns
+  great-circle arc length on the 4/3 earth while the inverse computes flat
+  straight-line distance with no curvature term. Range error reaches -313 m at
+  118 km and -4649 m at 460 km, maximised over elevation (it peaks near 35 degrees,
+  not at grazing incidence); elevation error reaches +1552 mdeg. Azimuth is
+  unaffected. `radar_palette` ships its own inverse, closing to ~1e-10 m, and
+  asserts the discrepancy in tests so an upstream fix surfaces as a failure.
 
 - `Xradar.time` assignment does not propagate to the underlying `DataTree`, so
   correcting an interpolated volume's time through the Py-ART wrapper left an

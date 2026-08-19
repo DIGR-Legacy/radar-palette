@@ -40,8 +40,32 @@ changing the public signature.
 
 from __future__ import annotations
 
+from radar_palette.gridding.census import (
+    AZ_DEV_TOL_FRAC,
+    DR_DEV_TOL_FRAC,
+    SPLIT_CUT_TOL_DEG,
+    SweepClass,
+    SweepGeometry,
+    census_radar,
+    census_sweep,
+)
+from radar_palette.gridding.geometry import (
+    EARTH_RADIUS_EFFECTIVE_M,
+    antenna_to_cartesian_43,
+    cartesian_to_antenna_43,
+)
 from radar_palette.gridding.gridder import grid_volume
 
 __all__ = [
+    "AZ_DEV_TOL_FRAC",
+    "DR_DEV_TOL_FRAC",
+    "EARTH_RADIUS_EFFECTIVE_M",
+    "SPLIT_CUT_TOL_DEG",
+    "SweepClass",
+    "SweepGeometry",
+    "antenna_to_cartesian_43",
+    "cartesian_to_antenna_43",
+    "census_radar",
+    "census_sweep",
     "grid_volume",
 ]
