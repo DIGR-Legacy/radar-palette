@@ -22,11 +22,31 @@ warp field have that sign inversion applied internally.
 
 Reflectivity is interpolated in dBZ, not linear Z.
 
+Object flavours
+---------------
+Entry points accept a :class:`pyart.core.Radar` or an :class:`xarray.DataTree`
+and return the same family by default; pass ``output_flavor`` to convert. See
+:mod:`radar_palette.io`.
+
 Status
 ------
-Scaffolding only: the implementation lands in follow-up pull requests.
+Time reconstruction (:mod:`radar_palette.advection.timing`) and its flavour-aware
+entry point are implemented. The motion-estimation and reconstruction operators
+land in follow-up pull requests.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from radar_palette.advection.interpolate import retime_interpolated_volume
+from radar_palette.advection.timing import (
+    apply_interpolated_time,
+    interpolate_ray_times,
+    volume_reference_time,
+)
+
+__all__ = [
+    "apply_interpolated_time",
+    "interpolate_ray_times",
+    "retime_interpolated_volume",
+    "volume_reference_time",
+]

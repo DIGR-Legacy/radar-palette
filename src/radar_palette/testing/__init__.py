@@ -1,17 +1,17 @@
 """Synthetic radar objects and analytic fields for tests and examples.
 
-Validating an interpolation operator needs a ground truth the operator did
-not see.  The generators here build Py-ART ``Radar`` objects on realistic
-scan geometries, painted with analytic fields whose exact value at any
-(time, position) is known -- for example a scene advected rigidly at a
-prescribed velocity, so the true intermediate volume is available in closed
-form.
-
-Status
-------
-Scaffolding only: the implementation lands in follow-up pull requests.
+Validating an interpolation operator needs a ground truth the operator did not
+see. The generators here build Py-ART ``Radar`` objects on realistic scan
+geometries with explicitly controlled acquisition times, so that timing
+behaviour can be tested without depending on a particular field or on real data
+being present.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from radar_palette.testing.volumes import assign_scan_times, make_empty_ppi_volume
+
+__all__ = [
+    "assign_scan_times",
+    "make_empty_ppi_volume",
+]

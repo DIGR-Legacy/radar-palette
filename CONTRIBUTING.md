@@ -35,7 +35,16 @@ that everything advertised there is importable.
   / `requires_finufft` markers in `tests/conftest.py` so a minimal install still
   collects a green suite.
 - **Units in docstrings**: always. Metres, seconds, degrees, dBZ.
+- **Object flavours**: public entry points accept both Py-ART and xradar objects
+  and return the caller's family by default (`output_flavor` overrides). Route
+  conversions through `radar_palette.io` and Py-ART's own interoperability layer
+  (`pyart.xradar`, `Grid.to_xarray`, xradar's cfradial readers) — do not hand-roll
+  a mapping between the two data models.
 - **Reflectivity is interpolated in dBZ**, not linear Z.
+- **An interpolated volume carries the time it represents**, never the time of a
+  volume it was derived from. Reconstruct times via
+  `radar_palette.advection.timing`; do not let a `deepcopy` of a bracketing
+  volume carry its clock through to the output.
 - **Displacement is physical echo displacement** (first volume to second, metres);
   `velocity = displacement / dt`, no sign flip.
 - **Validation**: an interpolation operator gets tested against a ground truth it
