@@ -22,11 +22,26 @@ Spectral interpolation of reflectivity is performed in dBZ.  Interpolating
 band-limited fields in linear Z drives large negative excursions (Gibbs
 ringing) on real sweeps and is not supported.
 
+Object flavours
+---------------
+:func:`grid_volume` accepts a :class:`pyart.core.Radar` or an
+:class:`xarray.DataTree`, and returns Cartesian output in the matching family:
+Py-ART input gives a :class:`pyart.core.Grid`, xradar input gives an
+:class:`xarray.Dataset`. Pass ``output_flavor`` to override. See
+:mod:`radar_palette.io`.
+
 Status
 ------
-Scaffolding only: the implementation lands in follow-up pull requests.
+The flavour-aware entry point :func:`grid_volume` is implemented, currently
+backed by :func:`pyart.map.grid_from_radars`. The spectral operator described
+above lands in a follow-up pull request and will replace that backing without
+changing the public signature.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from radar_palette.gridding.gridder import grid_volume
+
+__all__ = [
+    "grid_volume",
+]

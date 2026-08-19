@@ -15,13 +15,18 @@ common geometry and decibel-handling layer:
     periodic, and a non-uniform FFT otherwise.  A separate, non-spectral
     vertical operator handles the elevation dimension.
 
+``radar_palette.io``
+    Object-flavour interoperability. Both capabilities accept Py-ART
+    (``Radar``/``Grid``) and xradar (``DataTree``/xarray ``Dataset``) objects, and
+    return the family the caller passed in unless asked to convert.
+
 Both are research code intended for eventual upstreaming into Py-ART; the
 public API here is not yet stable.
 """
 
 from __future__ import annotations
 
-from radar_palette import advection, gridding, testing, util
+from radar_palette import advection, gridding, io, testing, util
 
 try:  # pragma: no cover - generated at build time by setuptools-scm
     from radar_palette._version import version as __version__
@@ -38,6 +43,7 @@ __all__ = [
     "__version__",
     "advection",
     "gridding",
+    "io",
     "testing",
     "util",
 ]
