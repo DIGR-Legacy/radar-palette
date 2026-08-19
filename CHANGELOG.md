@@ -17,6 +17,20 @@ git tags via `setuptools-scm`.
 - `radar_palette.testing`: `make_empty_ppi_volume` and `assign_scan_times` build
   bare PPI geometries with explicitly controlled acquisition times, so timing
   behaviour can be tested independently of any field data.
+- **Python floor raised to 3.11** (`requires-python = ">=3.11"`). `xradar` 0.12.0 — the release whose cfradial readers this
+  package depends on — requires 3.11, and Py-ART made the same move (`arm_pyart`
+  2.2.1 dropped 3.10). A 3.10 environment could only resolve `arm_pyart` 2.2.0 /
+  `xradar` 0.11.1, an older stack than the one tested here. The CI matrix entry for
+  3.10 is removed in a companion change to `.github/workflows/ci.yml`, which a
+  personal access token cannot push (GitHub gates workflow files on the classic
+  `workflow` scope); until it lands the 3.10 job fails at install, correctly, since
+  pip refuses a package whose `requires-python` excludes the interpreter.
+- `xarray`, `xradar` and `netCDF4` are now declared dependencies. They were
+  previously satisfied transitively through `arm_pyart` while being imported
+  directly, which works only as long as a resolver happens to choose that way.
+- Packaging tests assert that every third-party module the library imports is a
+  declared dependency, and that the declared `xarray` floor actually provides
+  `xarray.DataTree`.
 - `radar_palette.io`: object-flavour interoperability between Py-ART
   (`Radar`/`Grid`) and xradar (`DataTree`/xarray `Dataset`). Conversions delegate
   to Py-ART's own layer (`pyart.xradar`, `Grid.to_xarray`, xradar's cfradial

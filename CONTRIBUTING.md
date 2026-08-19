@@ -15,7 +15,7 @@ ruff format --check .
 pytest
 ```
 
-CI runs the same three on Python 3.10 through 3.13, plus a minimal-install job
+CI runs the same three on Python 3.11 through 3.13, plus a minimal-install job
 that exercises the optional-dependency skip paths and a build job that runs
 `twine check --strict`.
 
@@ -81,3 +81,14 @@ RADAR_PALETTE_DOCS_OFFLINE=1 make -C docs html
 
 Versions come from git tags via `setuptools-scm`. Tag `vX.Y.Z` on `main`; there
 is no version string to edit by hand.
+
+If a local build reports `0.0.0`, `setuptools-scm` could not derive a version and
+fell back to `fallback_version` — expected while no release tag exists, and also
+seen in sandboxed or unusual checkouts where it declines to inspect the
+repository. Check with:
+
+```bash
+python -c "import setuptools_scm, os; print(setuptools_scm.get_version(root=os.getcwd()))"
+```
+
+CI builds with `fetch-depth: 0` so tags are available there.

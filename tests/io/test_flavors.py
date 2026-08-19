@@ -14,7 +14,7 @@ silently.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pytest
@@ -37,7 +37,7 @@ from radar_palette.io import (  # noqa: E402
 )
 from radar_palette.testing import assign_scan_times, make_empty_ppi_volume  # noqa: E402
 
-VOLUME_START = datetime(2011, 5, 20, 11, 34, 0, tzinfo=timezone.utc)
+VOLUME_START = datetime(2011, 5, 20, 11, 34, 0, tzinfo=UTC)
 
 
 def add_constant_field(radar, field_name="reflectivity", value=0.0):
