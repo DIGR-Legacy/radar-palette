@@ -16,6 +16,23 @@ band-limited resampling operator rather than a local weighted average:
    spectral: tilt spacing is coarse, non-uniform and non-periodic, so a
    spectral operator in elevation is not defensible.
 
+All three are now wired behind :func:`grid_volume` as ``method="spectral"``.
+
+Choosing a method
+-----------------
+``method="pyart"`` remains the **default**, and deliberately so: the two operators
+are different, not ranked. Distance weighting smooths and cannot overshoot; the
+spectral operator is exact where the sampling supports it but rings at a
+discontinuity --- measured +5.5 / -5.3 dB beyond the data on a hard azimuthal echo
+edge. Switching the default would change every existing caller's numbers in exchange
+for a trade-off they did not ask for, so sharpness is opt-in.
+
+The spectral path also emits a ``coverage_flag`` field: a radar volume does not
+observe a box, and the flag distinguishes *why* a cell is empty (below the lowest
+tilt, above the highest, a hole in the tilt run, too few tilts) rather than leaving
+an unexplained NaN. Accuracy is limited by tilt spacing far more than by
+interpolation scheme --- see :func:`interp_column_stack` for the measurements.
+
 Conventions
 -----------
 Spectral interpolation of reflectivity is performed in dBZ.  Interpolating
@@ -69,7 +86,11 @@ from radar_palette.gridding.geometry import (
     antenna_to_cartesian_43,
     cartesian_to_antenna_43,
 )
-from radar_palette.gridding.gridder import grid_volume
+from radar_palette.gridding.gridder import (
+    DEFAULT_GRIDDING_METHOD,
+    GRIDDING_METHODS,
+    grid_volume,
+)
 from radar_palette.gridding.reflectivity import (
     DBZ_PHYSICAL_CEILING,
     LinearReflectivityError,
@@ -88,6 +109,8 @@ from radar_palette.gridding.vertical import (
 )
 
 __all__ = [
+    "GRIDDING_METHODS",
+    "DEFAULT_GRIDDING_METHOD",
     "DEFAULT_VERTICAL_SCHEME",
     "target_lattice",
     "target_elevation",

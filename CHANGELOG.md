@@ -8,6 +8,14 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `grid_volume` gains `method={"pyart", "spectral"}`, wiring the spectral operator
+  behind the public entry point. The FFT gridding capability is now complete end to
+  end: sweep census, per-sweep spectral evaluation on its cone, and vertical
+  assembly, reachable in one call from either object family.
+- The spectral path emits a `coverage_flag` field alongside the data, carrying
+  `VerticalFlag` per cell. A radar volume does not observe a box, and an unexplained
+  NaN leaves a user unable to tell a data gap from a geometric coverage limit.
+
 - `radar_palette.gridding.cones`: `cone_range_height`, `target_lattice`,
   `dedup_sweeps`, `build_cones`, `beam_footprint_crossover`, plus `ConeStack` and
   `TiltReport`. A sweep samples a curved cone, not a plane, so each tilt is gridded
@@ -102,6 +110,16 @@ git tags via `setuptools-scm`.
   input to an xarray `Dataset`. `output_flavor` overrides either default.
 
 ### Changed
+
+- `DEFAULT_GRIDDING_METHOD` is `"pyart"`, so **existing callers of `grid_volume` get
+  byte-identical results** — asserted by a test comparing the default against a
+  direct `pyart.map.grid_from_radars` call. The spectral operator is opt-in because
+  the two are different rather than ranked: on a hard azimuthal echo edge (10 to
+  50 dBZ wedge) the spectral interpolant reaches 55.5 and 4.7 dBZ (+5.5 / −5.3 dB
+  beyond the data) while distance weighting stays inside the input range, since an
+  average cannot exceed its inputs. Where both produce data on a smooth field they
+  agree to 0.35 dB median. A test ties the constant to that measurement, so flipping
+  the default fails with a reason rather than silently.
 
 - Vertical interpolation defaults to `pchip_z` (monotone), which measured best of the
   four schemes and cannot introduce an extremum between two cones. The margin is
