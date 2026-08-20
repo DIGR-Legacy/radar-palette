@@ -35,6 +35,15 @@ that everything advertised there is importable.
   / `requires_finufft` markers in `tests/conftest.py` so a minimal install still
   collects a green suite.
 - **Units in docstrings**: always. Metres, seconds, degrees, dBZ.
+- **No extrapolation, ever**: a vertical target outside the observed cone span gets
+  NaN and a `VerticalFlag`, never a guessed value. Keep the invariant that finite
+  values and `INTERPOLATED` flags are the same set — a NaN wearing an interpolated
+  flag is a silent hole, and a finite value without one is a silent extrapolation.
+  `tests/gridding/test_vertical.py` asserts the equivalence directly.
+- **Report the layer, not just the value**: `gap_m` is what makes a gridded value
+  interpretable. Accuracy is set by tilt spacing rather than interpolation scheme (a
+  factor of 14 versus 1.2 in measurement), so any new vertical scheme should be
+  presented with its layer thickness rather than as an accuracy improvement.
 - **Motion-field sign**: the advection displacement is earlier-to-later, and the
   warp samples the earlier volume *behind* the gate (`position - alpha * D`).
   Reversing either makes reconstruction worse than a naive time average while still
