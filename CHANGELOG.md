@@ -8,6 +8,21 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `radar_palette.gridding.cones`: `cone_range_height`, `target_lattice`,
+  `dedup_sweeps`, `build_cones`, `beam_footprint_crossover`, plus `ConeStack` and
+  `TiltReport`. A sweep samples a curved cone, not a plane, so each tilt is gridded
+  onto a shared horizontal lattice carrying its own height surface. `dedup_sweeps`
+  collapses split cuts by measured range rather than by cut naming, so it needs no
+  knowledge of any radar's scan-strategy vocabulary.
+- `radar_palette.gridding.vertical`: `interp_column_stack`, `target_elevation`,
+  `intercone_gap`, `VerticalFlag`, `VerticalProfile` and `DEFAULT_VERTICAL_SCHEME`.
+  Interpolates a cone stack onto target heights per column, with **no
+  extrapolation**: every finite value carries `VerticalFlag.INTERPOLATED` and every
+  other cell is NaN with a flag saying why. `INTERIOR_GAP` covers the case that is
+  easy to miss — maximum valid range is a property of the echo, not the geometry, so
+  it can be non-monotonic in elevation and leave a hole in a column's tilt run that
+  must not be interpolated across.
+
 - `radar_palette.advection.flow`: `grid_optical_flow` estimates a dense,
   height-resolved echo motion field between two gridded volumes (TV-L1 optical flow
   per vertical level). Returns displacement in metres in the earlier-to-later sense,
@@ -87,6 +102,17 @@ git tags via `setuptools-scm`.
   input to an xarray `Dataset`. `output_flavor` overrides either default.
 
 ### Changed
+
+- Vertical interpolation defaults to `pchip_z` (monotone), which measured best of the
+  four schemes and cannot introduce an extremum between two cones. The margin is
+  small and that is the point: **tilt spacing, not scheme choice, is what limits
+  vertical accuracy.** On a bright band at 2500 m with a 400 m standard deviation,
+  going from 6 tilts to 23 (median inter-cone thickness 680 m to 213 m) improved RMSE
+  from 4.086 dB to 0.295 dB — a factor of 14 — while the best-vs-worst scheme spread
+  at 6 tilts was only 4.024 to 5.194 dB. Within one scan strategy the error tracks the
+  local layer thickness: 0.42 dB median where adjacent cones are 400–700 m apart,
+  3.81 dB where they are 1200–2500 m apart. Read a gridded value alongside its
+  `gap_m`.
 
 - `test_third_party_imports_are_declared_dependencies` now accepts a package declared
   in *either* `project.dependencies` or an extra. Previously it failed on any
