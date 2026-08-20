@@ -8,6 +8,19 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `radar_palette.advection.flow`: `grid_optical_flow` estimates a dense,
+  height-resolved echo motion field between two gridded volumes (TV-L1 optical flow
+  per vertical level). Returns displacement in metres in the earlier-to-later sense,
+  `(north, east)` order.
+- `radar_palette.advection.morph`: `advection_interpolate` reconstructs a volume at
+  a time between two observed volumes, advecting each bracketing volume to the target
+  time along that field and blending. The morph runs per gate in native
+  (azimuth, slant range, elevation) coordinates, so the output is an ordinary volume
+  rather than a Cartesian grid; only the motion estimation goes through a grid.
+  Accepts and returns both object flavours, and applies the acquisition-time
+  correction from `radar_palette.advection.timing` at the source, so a reconstructed
+  volume never inherits a bracketing volume's clock.
+
 - `radar_palette.gridding.evaluator`: `SweepSpectralEvaluator` turns a sampled sweep
   into a continuous band-limited function, evaluable at arbitrary
   (range, azimuth). Three azimuth paths chosen by sweep class — exact FFT for a
@@ -74,6 +87,14 @@ git tags via `setuptools-scm`.
   input to an xarray `Dataset`. `output_flavor` overrides either default.
 
 ### Changed
+
+- `test_third_party_imports_are_declared_dependencies` now accepts a package declared
+  in *either* `project.dependencies` or an extra. Previously it failed on any
+  correctly-gated optional import, which would have pressured a contributor into
+  declaring `scikit-image` as required or deleting the guard. A companion test,
+  `test_optional_imports_are_not_required_dependencies`, closes the loophole from the
+  other side by asserting `scikit-image` and `finufft` stay optional. Both were
+  verified non-vacuous by deleting a declaration and confirming each fires.
 
 - **Conjugate-gradient refinement of the NUFFT path is now on by default**
   (`DEFAULT_CG_ITERATIONS = 12`), departing from the research code it was ported

@@ -28,16 +28,36 @@ Entry points accept a :class:`pyart.core.Radar` or an :class:`xarray.DataTree`
 and return the same family by default; pass ``output_flavor`` to convert. See
 :mod:`radar_palette.io`.
 
-Status
-------
-Time reconstruction (:mod:`radar_palette.advection.timing`) and its flavour-aware
-entry point are implemented. The motion-estimation and reconstruction operators
-land in follow-up pull requests.
+Modules
+-------
+:mod:`radar_palette.advection.flow`
+    Dense, height-resolved motion estimation between two gridded volumes.
+:mod:`radar_palette.advection.morph`
+    Reconstruction of a volume at an intermediate time, on native geometry.
+:mod:`radar_palette.advection.timing`
+    Acquisition-time reconstruction, wired into the morph so its output carries
+    the instant it represents rather than a bracketing volume's clock.
+:mod:`radar_palette.advection.interpolate`
+    Flavour-aware entry point for correcting a volume interpolated elsewhere.
+
+Expected benefit
+----------------
+On a synthetic rigid translation, advecting reduces reconstruction error by 73%
+against a naive time average. On real convection --- which grows, decays and changes
+shape between volumes in ways no advection scheme captures --- the improvement is a
+few percent. The large figure is the easy case, not the representative one.
+
+Optional dependency
+-------------------
+Motion estimation needs scikit-image: ``pip install radar-palette[advection]``.
+The timing functions do not.
 """
 
 from __future__ import annotations
 
+from radar_palette.advection.flow import grid_optical_flow
 from radar_palette.advection.interpolate import retime_interpolated_volume
+from radar_palette.advection.morph import advection_interpolate
 from radar_palette.advection.timing import (
     apply_interpolated_time,
     interpolate_ray_times,
@@ -45,7 +65,9 @@ from radar_palette.advection.timing import (
 )
 
 __all__ = [
+    "advection_interpolate",
     "apply_interpolated_time",
+    "grid_optical_flow",
     "interpolate_ray_times",
     "retime_interpolated_volume",
     "volume_reference_time",

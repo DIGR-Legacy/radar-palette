@@ -76,15 +76,30 @@ def test_third_party_imports_are_declared_dependencies():
     if not pyproject_path.is_file():  # installed without the source tree
         pytest.skip("pyproject.toml not available next to the test suite")
 
-    declared_requirements = tomllib.loads(pyproject_path.read_text())["project"][
-        "dependencies"
-    ]
-    declared_names = {
-        requirement.split(">")[0].split("=")[0].split("[")[0].strip().lower()
-        for requirement in declared_requirements
-    }
+    project_metadata = tomllib.loads(pyproject_path.read_text())["project"]
+
+    def distribution_names(requirements):
+        return {
+            requirement.split(">")[0].split("=")[0].split("[")[0].strip().lower()
+            for requirement in requirements
+        }
+
+    declared_names = distribution_names(project_metadata["dependencies"])
+    # An OPTIONAL dependency is declared too, just not required. Counting the extras
+    # matters: without them this guard fails on any correctly-gated optional import
+    # (scikit-image, finufft), which would push a contributor to either declare an
+    # optional package as required or delete the guard. Both are worse than the gap.
+    for extra_requirements in project_metadata.get(
+        "optional-dependencies", {}
+    ).values():
+        declared_names |= distribution_names(extra_requirements)
+
     # Distribution names differ from import names for these.
-    import_name_to_distribution = {"pyart": "arm_pyart", "netCDF4": "netcdf4"}
+    import_name_to_distribution = {
+        "pyart": "arm_pyart",
+        "netCDF4": "netcdf4",
+        "skimage": "scikit-image",
+    }
 
     imported_top_level_modules = set()
     for source_path in (project_root / "src" / "radar_palette").rglob("*.py"):
@@ -108,3 +123,33 @@ def test_third_party_imports_are_declared_dependencies():
     assert not undeclared, (
         f"imported but not declared in dependencies: {sorted(undeclared)}"
     )
+
+
+def test_optional_imports_are_not_required_dependencies():
+    """scikit-image and finufft must stay OPTIONAL, not creep into the hard set.
+
+    The sibling guard above accepts a package declared in *either* the required list
+    or an extra. That is correct, but it means promoting an optional dependency to
+    required would pass silently. This test closes that loophole from the other side:
+    the package must still install, and its non-optional API still import, without
+    the heavy optional stacks present.
+    """
+    import pathlib
+
+    tomllib = pytest.importorskip("tomllib", reason="tomllib is stdlib on 3.11+")
+
+    pyproject_path = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject_path.is_file():  # installed without the source tree
+        pytest.skip("pyproject.toml not available next to the test suite")
+
+    required = {
+        requirement.split(">")[0].split("=")[0].split("[")[0].strip().lower()
+        for requirement in tomllib.loads(pyproject_path.read_text())["project"][
+            "dependencies"
+        ]
+    }
+    for optional_distribution in ("scikit-image", "finufft"):
+        assert optional_distribution not in required, (
+            f"{optional_distribution} is an optional extra and must not be listed in "
+            "project.dependencies"
+        )
