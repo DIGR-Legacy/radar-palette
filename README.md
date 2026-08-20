@@ -16,8 +16,51 @@ until then this package is the place they live and get tested.
 | `radar_palette.util` | Shared beam-geometry and decibel-handling helpers. |
 | `radar_palette.testing` | Synthetic radar objects and analytic fields with known ground truth. |
 
-**Status: pre-alpha.** This commit is the packaging scaffold; the modules are
-documented but not yet implemented. Nothing here is API-stable.
+**Status: pre-alpha.** Both capabilities now work end to end, but nothing here is
+API-stable.
+
+## Usage
+
+```python
+from radar_palette.advection import advection_interpolate
+from radar_palette.gridding import grid_volume
+
+# Reconstruct a volume halfway between two observed ones, accounting for echo
+# motion. The motion field is estimated internally; the acquisition time of the
+# result is corrected to match.
+midpoint = advection_interpolate(earlier_volume, later_volume, alpha=0.5)
+
+# Grid a volume. The default reproduces Py-ART exactly; "spectral" opts into this
+# package's operator, which also reports why each empty cell is empty.
+grid = grid_volume(
+    volume,
+    grid_shape=(20, 241, 241),
+    grid_limits=((0.0, 10_000.0), (-120_000.0, 120_000.0), (-120_000.0, 120_000.0)),
+)
+sharp = grid_volume(
+    volume,
+    grid_shape=(20, 241, 241),
+    grid_limits=((0.0, 10_000.0), (-120_000.0, 120_000.0), (-120_000.0, 120_000.0)),
+    method="spectral",
+)
+coverage = sharp.fields["coverage_flag"]["data"]  # radar_palette.gridding.VerticalFlag
+```
+
+Either function accepts a `pyart.core.Radar` or an `xarray.DataTree` and returns the
+matching family; pass `output_flavor` to override.
+
+### Two gridding operators, and why the default is the older one
+
+`method="pyart"` distance-weights neighbouring gates: it smooths, and cannot
+overshoot. `method="spectral"` evaluates a band-limited interpolant per sweep: exact
+where the sampling supports it, but it rings at a discontinuity — measured +5.5 /
+−5.3 dB beyond the data on a hard azimuthal echo edge. Neither dominates, so the
+default preserves existing behaviour and sharpness is opt-in.
+
+For vertical accuracy the scan strategy matters far more than the interpolation
+scheme: on a bright band sharper than the tilt spacing, going from 6 tilts to 23
+improved RMSE by a factor of 14, while the best-versus-worst scheme choice gained
+1.2×. Read a gridded value alongside its layer thickness.
 
 ## Install
 

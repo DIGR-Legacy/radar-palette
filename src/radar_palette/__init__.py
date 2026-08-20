@@ -20,6 +20,10 @@ common geometry and decibel-handling layer:
     (``Radar``/``Grid``) and xradar (``DataTree``/xarray ``Dataset``) objects, and
     return the family the caller passed in unless asked to convert.
 
+Both capabilities are now complete end to end: an advected volume can be
+reconstructed at an intermediate time, and a volume can be gridded either by
+Py-ART's distance weighting or by this package's spectral operator.
+
 Both are research code intended for eventual upstreaming into Py-ART; the
 public API here is not yet stable.
 """
