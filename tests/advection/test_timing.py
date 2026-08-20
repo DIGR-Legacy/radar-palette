@@ -114,6 +114,73 @@ class TestVolumeReferenceTime:
         assert difference == pytest.approx(SECONDS_BETWEEN_VOLUMES, abs=1e-3)
 
 
+class TestUnequalRayCounts:
+    """Real volumes from the same radar do not repeat ray counts exactly.
+
+    Measured on ARM C-SAPR2 at Bankhead: three consecutive volumes of the same
+    15-sweep strategy have 13955, 13951 and 13954 rays, because a sweep occasionally
+    records one ray more or fewer. An equality requirement on ``nrays`` rejects
+    every such pair, which is to say every real pair.
+
+    The arithmetic never needed it: the interpolated volume keeps ``radar_early``'s
+    acquisition pattern and is shifted by a single scalar derived from the two
+    volumes' reference times, so there is no ray-to-ray correspondence to violate.
+    """
+
+    def _volume(self, rays_per_sweep, start):
+        return assign_scan_times(
+            make_empty_ppi_volume(nsweeps=1, ngates=5, rays_per_sweep=rays_per_sweep),
+            start,
+        )
+
+    def test_accepts_volumes_differing_by_one_ray(self):
+        """The case that real data actually presents."""
+        early = self._volume(360, datetime(2026, 8, 18, 23, 29, tzinfo=UTC))
+        late = self._volume(359, datetime(2026, 8, 18, 23, 45, tzinfo=UTC))
+        times = interpolate_ray_times(early, late, 0.5)
+        assert len(times["data"]) == early.nrays
+
+    def test_output_length_follows_the_earlier_volume(self):
+        """Output geometry is ``earlier``'s, so its ray count is ``earlier``'s."""
+        early = self._volume(360, datetime(2026, 8, 18, 23, 29, tzinfo=UTC))
+        for late_rays in (300, 359, 361, 420):
+            late = self._volume(late_rays, datetime(2026, 8, 18, 23, 45, tzinfo=UTC))
+            assert len(interpolate_ray_times(early, late, 0.5)["data"]) == 360
+
+    def test_unequal_counts_give_the_same_shift_as_equal_ones(self):
+        """The shift depends on reference times, not on ray counts.
+
+        Truncating the later volume changes its ray count and its mean ray time,
+        so this compares against a later volume whose reference time is held fixed
+        by construction: same start, same interval, different length. The resulting
+        volume-level shift must differ only through that reference time, never
+        through the count itself.
+        """
+        early = self._volume(360, datetime(2026, 8, 18, 23, 29, tzinfo=UTC))
+        late_full = self._volume(360, datetime(2026, 8, 18, 23, 45, tzinfo=UTC))
+        late_short = self._volume(359, datetime(2026, 8, 18, 23, 45, tzinfo=UTC))
+        full = interpolate_ray_times(early, late_full, 0.5)
+        short = interpolate_ray_times(early, late_short, 0.5)
+        expected_gap = (
+            0.5
+            * (
+                volume_reference_time(late_full) - volume_reference_time(late_short)
+            ).total_seconds()
+        )
+        actual_gap = (
+            num2date(full["data"][0], full["units"], calendar=full["calendar"])
+            - num2date(short["data"][0], short["units"], calendar=short["calendar"])
+        ).total_seconds()
+        assert actual_gap == pytest.approx(expected_gap, abs=1e-6)
+
+    def test_apply_interpolated_time_accepts_unequal_counts(self):
+        """The public entry point must not reimpose the restriction."""
+        early = self._volume(360, datetime(2026, 8, 18, 23, 29, tzinfo=UTC))
+        late = self._volume(359, datetime(2026, 8, 18, 23, 45, tzinfo=UTC))
+        out = apply_interpolated_time(early, early, late, 0.5)
+        assert out.nrays == 360
+
+
 class TestInterpolateRayTimes:
     """``interpolate_ray_times`` blends two volumes' ray times at a fraction."""
 
@@ -238,13 +305,20 @@ class TestInterpolateRayTimes:
         advance = elapsed_seconds(mean_moment, volume_reference_time(early_volume))
         assert advance == pytest.approx(1.5 * SECONDS_BETWEEN_VOLUMES, abs=1e-3)
 
-    def test_rejects_volumes_whose_ray_counts_differ(self, early_volume):
+    def test_a_differing_ray_count_is_not_an_error(self, early_volume):
+        """Superseded requirement: ray counts were once required to match.
+
+        They are not, and requiring it rejected every real pair (see
+        ``TestUnequalRayCounts``). Halving the later volume's rays changes its
+        length and its mean ray time but must still produce a full-length result
+        on the earlier volume's pattern.
+        """
         mismatched = assign_scan_times(
             make_empty_ppi_volume(rays_per_sweep=180),
             VOLUME_START + timedelta(seconds=SECONDS_BETWEEN_VOLUMES),
         )
-        with pytest.raises(ValueError, match="ray"):
-            interpolate_ray_times(early_volume, mismatched, 0.5)
+        times = interpolate_ray_times(early_volume, mismatched, 0.5)
+        assert len(times["data"]) == early_volume.nrays
 
     def test_rejects_a_non_finite_alpha(self, early_volume, late_volume):
         with pytest.raises(ValueError, match="finite"):
