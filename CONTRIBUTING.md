@@ -35,6 +35,12 @@ that everything advertised there is importable.
   / `requires_finufft` markers in `tests/conftest.py` so a minimal install still
   collects a green suite.
 - **Units in docstrings**: always. Metres, seconds, degrees, dBZ.
+- **Motion-field sign**: the advection displacement is earlier-to-later, and the
+  warp samples the earlier volume *behind* the gate (`position - alpha * D`).
+  Reversing either makes reconstruction worse than a naive time average while still
+  looking plausible, so establish the sign from the end-to-end test in
+  `tests/advection/test_interpolate.py` — warp by the full displacement and check it
+  reproduces the later volume — never from reading the code.
 - **Reflectivity units**: interpolate in **dBZ**, never linear Z. Linear
   reflectivity through a band-limited interpolant goes negative at echo edges
   (42.6% of samples in a measured reproduction), and the negatives become
