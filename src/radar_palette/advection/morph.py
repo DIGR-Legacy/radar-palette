@@ -93,14 +93,39 @@ def _extend_over_no_echo(displacement, echo_mask):
 
 
 def _sweep_sampler(radar, sweep, field):
-    """Azimuth-sorted (azimuth, range, values) for one sweep, ready to interpolate."""
+    """Azimuth-sorted (azimuth, range, values) for one sweep, ready to interpolate.
+
+    Repeated azimuths are collapsed to one ray, averaging the rays that share an
+    angle. A real antenna does record the same azimuth twice -- measured on ARM
+    C-SAPR2, 3 of 195 sweeps across 13 consecutive volumes contain one duplicate,
+    which is what a brief dwell looks like in the data -- and the interpolator built
+    in :func:`_sample_sweep` needs a *strictly* ascending axis, so a single repeat
+    would otherwise make the whole reconstruction raise. Averaging rather than
+    discarding keeps both measurements: they are independent samples of the same
+    beam position, so their mean is the better estimate of it.
+    """
     start, end = radar.get_start_end(sweep)
     azimuths = radar.azimuth["data"][start : end + 1]
     values = np.ma.filled(
         radar.fields[field]["data"][start : end + 1].astype("float64"), np.nan
     )
     order = np.argsort(azimuths)
-    return azimuths[order], radar.range["data"], values[order]
+    azimuths, values = azimuths[order], values[order]
+
+    unique_azimuths, inverse = np.unique(azimuths, return_inverse=True)
+    if unique_azimuths.size != azimuths.size:
+        # nanmean per group: a duplicated ray may be masked in one copy and not the
+        # other, and an all-nan group must stay nan rather than becoming zero.
+        finite = np.isfinite(values)
+        totals = np.zeros((unique_azimuths.size, values.shape[1]))
+        counts = np.zeros_like(totals)
+        np.add.at(totals, inverse, np.where(finite, values, 0.0))
+        np.add.at(counts, inverse, finite)
+        with np.errstate(invalid="ignore"):
+            values = np.where(counts > 0, totals / counts, np.nan)
+        azimuths = unique_azimuths
+
+    return azimuths, radar.range["data"], values
 
 
 def _sample_sweep(azimuths_deg, ranges_m, sampler):

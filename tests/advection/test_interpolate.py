@@ -547,3 +547,84 @@ class TestObjectFlavours:
             grid_limits=FLOW_GRID_LIMITS,
         )
         assert isinstance(result, pyart.core.Radar)
+
+
+@requires_skimage
+class TestRepeatedAzimuths:
+    """A real antenna sometimes records the same azimuth twice in one sweep.
+
+    Measured on ARM C-SAPR2: 3 of 195 sweeps across 13 consecutive volumes contain
+    one duplicated azimuth, which is what a brief dwell looks like in the data. A
+    synthetic volume built from ``arange`` never does, so this went unnoticed until
+    the operator was run on a real sequence.
+
+    It matters because :func:`_sample_sweep` tiles the azimuth axis at -360, 0 and
+    +360 degrees to make the 0/360 seam interpolate correctly, and
+    ``RegularGridInterpolator`` requires that axis to be *strictly* ascending.
+    Sorting puts duplicates adjacent, so a single repeat makes the whole
+    reconstruction raise rather than degrade.
+    """
+
+    def _volume_with_duplicate_azimuth(self, offset_east_m, start_second=0.0):
+        """A translating volume whose first sweep repeats one azimuth."""
+        radar = make_translating_volume(offset_east_m, start_second=start_second)
+        azimuths = radar.azimuth["data"].copy()
+        # duplicate ray 10 onto ray 11 within the first sweep
+        azimuths[11] = azimuths[10]
+        radar.azimuth["data"] = azimuths
+        return radar
+
+    def test_duplicate_azimuth_does_not_raise(self):
+        """The case real data presents: one repeated azimuth in one sweep."""
+        earlier = self._volume_with_duplicate_azimuth(0.0)
+        later = self._volume_with_duplicate_azimuth(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        result = advection_interpolate(earlier, later, alpha=0.5)
+        assert "reflectivity" in result.fields
+
+    def test_duplicate_azimuth_gives_a_usable_field(self):
+        """Not merely non-raising: the reconstruction must still carry echo."""
+        earlier = self._volume_with_duplicate_azimuth(0.0)
+        later = self._volume_with_duplicate_azimuth(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        values = advection_interpolate(earlier, later, alpha=0.5).fields[
+            "reflectivity"
+        ]["data"]
+        finite = np.isfinite(np.ma.filled(values.astype("float64"), np.nan))
+        assert finite.mean() > 0.5
+        assert np.nanmax(np.ma.filled(values.astype("float64"), np.nan)) > 10.0
+
+    def test_many_duplicates_still_work(self):
+        """Degenerate but legal: a sweep that dwells repeatedly."""
+        earlier = make_translating_volume(0.0)
+        later = make_translating_volume(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        for radar in (earlier, later):
+            azimuths = radar.azimuth["data"].copy()
+            azimuths[5:15] = azimuths[5]
+            radar.azimuth["data"] = azimuths
+        result = advection_interpolate(earlier, later, alpha=0.5)
+        assert "reflectivity" in result.fields
+
+    def test_duplicate_free_input_is_unaffected(self):
+        """The fix must not perturb the well-behaved case.
+
+        Reconstructing from strictly-ascending azimuths must give bit-identical
+        output before and after de-duplication, since there is nothing to remove.
+        """
+        earlier = make_translating_volume(0.0)
+        later = make_translating_volume(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        first = advection_interpolate(earlier, later, alpha=0.5).fields["reflectivity"][
+            "data"
+        ]
+        second = advection_interpolate(earlier, later, alpha=0.5).fields[
+            "reflectivity"
+        ]["data"]
+        np.testing.assert_array_equal(
+            np.ma.filled(first, np.nan), np.ma.filled(second, np.nan)
+        )
