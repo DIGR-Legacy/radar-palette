@@ -24,7 +24,7 @@ The tests are organised around the three things that can independently be wrong:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
@@ -486,6 +486,112 @@ class TestTargetTimeSelection:
         )
         np.testing.assert_allclose(
             field_array(default), field_array(explicit), atol=1e-6
+        )
+
+    def test_accepts_a_naive_target_time(self, bracketing_volumes):
+        """The most natural call a Py-ART user can make must work.
+
+        ``pyart.util.datetime_from_radar`` returns a *naive* datetime while
+        :func:`volume_reference_time` returns a UTC-aware one, so building a target
+        from the former and passing it here used to raise
+
+            TypeError: can't subtract offset-naive and offset-aware datetimes
+
+        The existing tests all built the target from ``volume_reference_time``, so
+        they were aware-on-aware and never reached this. CF times are UTC by
+        construction, so a naive target is interpreted as UTC rather than rejected.
+        """
+        earlier, later, _ = bracketing_volumes
+        aware = volume_reference_time(earlier)
+        span = (volume_reference_time(later) - aware).total_seconds()
+        aware_target = aware + timedelta(seconds=0.5 * span)
+        naive_target = aware_target.replace(tzinfo=None)
+        assert naive_target.tzinfo is None
+
+        from_naive = advection_interpolate(
+            earlier,
+            later,
+            target_time=naive_target,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        from_aware = advection_interpolate(
+            earlier,
+            later,
+            target_time=aware_target,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        np.testing.assert_allclose(
+            field_array(from_naive), field_array(from_aware), atol=1e-6
+        )
+
+    def test_naive_and_aware_targets_agree_off_the_midpoint(self, bracketing_volumes):
+        """Not just at alpha=0.5, where a sign or offset slip would cancel."""
+        earlier, later, _ = bracketing_volumes
+        aware = volume_reference_time(earlier)
+        span = (volume_reference_time(later) - aware).total_seconds()
+        target = aware + timedelta(seconds=0.25 * span)
+        from_naive = advection_interpolate(
+            earlier,
+            later,
+            target_time=target.replace(tzinfo=None),
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        from_alpha = advection_interpolate(
+            earlier,
+            later,
+            alpha=0.25,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        np.testing.assert_allclose(
+            field_array(from_naive), field_array(from_alpha), atol=1e-6
+        )
+
+    def test_accepts_a_cftime_target(self, bracketing_volumes):
+        """The type ``pyart.util.datetime_from_radar`` actually returns.
+
+        It is a ``cftime.DatetimeGregorian``, which is *not* a
+        :class:`datetime.datetime` subclass and whose ``replace()`` rejects
+        ``tzinfo`` outright. A first version of this fix normalised with
+        ``target_time.replace(tzinfo=UTC)`` and passed the naive-datetime test above
+        while still raising on real Py-ART input, so the two cases are pinned
+        separately.
+        """
+        cftime = pytest.importorskip("cftime")
+        earlier, later, _ = bracketing_volumes
+        aware = volume_reference_time(earlier)
+        span = (volume_reference_time(later) - aware).total_seconds()
+        midpoint = aware + timedelta(seconds=0.5 * span)
+        target = cftime.DatetimeGregorian(
+            midpoint.year,
+            midpoint.month,
+            midpoint.day,
+            midpoint.hour,
+            midpoint.minute,
+            midpoint.second,
+            midpoint.microsecond,
+        )
+        assert not isinstance(target, datetime)
+
+        from_cftime = advection_interpolate(
+            earlier,
+            later,
+            target_time=target,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        from_alpha = advection_interpolate(
+            earlier,
+            later,
+            alpha=0.5,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        np.testing.assert_allclose(
+            field_array(from_cftime), field_array(from_alpha), atol=1e-6
         )
 
     def test_rejects_a_missing_field(self, bracketing_volumes):

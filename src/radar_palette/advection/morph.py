@@ -46,6 +46,7 @@ interval before the instant it depicts.
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -153,11 +154,36 @@ def _sample_sweep(azimuths_deg, ranges_m, sampler):
 
 
 def _resolve_alpha(earlier, later, alpha, target_time):
-    """Fractional position of the target between the two volumes."""
+    """Fractional position of the target between the two volumes.
+
+    A *naive* ``target_time`` is read as UTC rather than rejected. CF times are UTC
+    by construction and :func:`volume_reference_time` returns an aware instant, but
+    ``pyart.util.datetime_from_radar`` returns a naive one -- so building a target
+    from a Py-ART time and passing it here used to raise ``TypeError: can't subtract
+    offset-naive and offset-aware datetimes``. That is the most natural call a
+    Py-ART user can make. This mirrors the rule already applied to decoded ray times
+    in :func:`radar_palette.advection.timing._decode_ray_times`.
+
+    The normalisation rebuilds the instant field by field rather than calling
+    ``replace(tzinfo=UTC)``, because Py-ART hands back a ``cftime.DatetimeGregorian``
+    -- not a :class:`datetime.datetime` subclass, and its ``replace()`` rejects
+    ``tzinfo`` outright.
+    """
     if alpha is not None:
         return float(alpha)
     if target_time is None:
         return 0.5
+    if getattr(target_time, "tzinfo", None) is None:
+        target_time = datetime(
+            target_time.year,
+            target_time.month,
+            target_time.day,
+            target_time.hour,
+            target_time.minute,
+            target_time.second,
+            target_time.microsecond,
+            tzinfo=UTC,
+        )
     earlier_time = volume_reference_time(earlier)
     span_s = (volume_reference_time(later) - earlier_time).total_seconds()
     if span_s == 0.0:

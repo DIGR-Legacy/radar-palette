@@ -176,6 +176,15 @@ git tags via `setuptools-scm`.
   output carries the earlier volume's acquisition pattern shifted by a single scalar
   derived from the two reference times, so `radar_late` contributes no per-ray
   correspondence to violate.
+- `target_time` now accepts a naive or `cftime` instant. `volume_reference_time`
+  returns a UTC-aware time but `pyart.util.datetime_from_radar` returns a naive
+  `cftime.DatetimeGregorian`, so building a target from a Py-ART time -- the most
+  natural call a Py-ART user can make -- raised `TypeError: can't subtract
+  offset-naive and offset-aware datetimes`. A naive target is now read as UTC, which
+  CF times are by construction, matching the rule already applied to decoded ray
+  times. The normalisation rebuilds the instant field by field rather than calling
+  `replace(tzinfo=UTC)`, because `cftime.DatetimeGregorian` is not a
+  `datetime.datetime` subclass and its `replace()` rejects `tzinfo`.
 - `_sweep_sampler` now collapses repeated azimuths instead of raising. A real
   antenna records the same azimuth twice when it dwells — 3 of 195 sweeps across 13
   consecutive volumes — and the sorted-but-not-deduplicated axis made the wrap
