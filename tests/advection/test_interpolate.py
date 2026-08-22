@@ -628,3 +628,125 @@ class TestRepeatedAzimuths:
         np.testing.assert_array_equal(
             np.ma.filled(first, np.nan), np.ma.filled(second, np.nan)
         )
+
+
+@requires_skimage
+class TestCarryFields:
+    """One motion field, several variables warped by it.
+
+    Polarimetric variables are not tracers. Differential reflectivity is a shape
+    measure, correlation coefficient is closer to a quality flag, and Doppler
+    velocity is signed and folded at the Nyquist interval -- estimating optical flow
+    from any of them would be tracking the wrong thing. Reflectivity is the tracer;
+    the motion it yields is a property of the *scene*, so the physically defensible
+    move is to estimate once and apply that displacement to every variable.
+
+    Calling the operator once per variable would instead derive a different motion
+    field from each, which is both wrong and four times the cost.
+    """
+
+    def _pair(self):
+        earlier = make_translating_volume(0.0)
+        later = make_translating_volume(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        for radar in (earlier, later):
+            reflectivity = np.ma.filled(
+                radar.fields["reflectivity"]["data"].astype("float64"), np.nan
+            )
+            # A companion variable with different units and a different sign
+            # convention, so a swap or a unit slip would show up.
+            radar.add_field(
+                "differential_reflectivity",
+                {
+                    "data": np.ma.masked_invalid(0.1 * reflectivity - 2.0),
+                    "units": "dB",
+                    "standard_name": "differential_reflectivity",
+                },
+            )
+        return earlier, later
+
+    def test_carried_field_appears_in_the_output(self):
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        assert set(result.fields) == {"reflectivity", "differential_reflectivity"}
+
+    def test_carried_field_keeps_its_own_metadata(self):
+        """A carried variable must not inherit the tracer's units."""
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        assert result.fields["differential_reflectivity"]["units"] == "dB"
+        assert result.fields["reflectivity"]["units"] != "dB"
+
+    def test_carrying_reproduces_a_separate_call_on_the_tracer(self):
+        """Adding a carried variable must not perturb the tracer's own result."""
+        earlier, later = self._pair()
+        alone = advection_interpolate(earlier, later, alpha=0.5)
+        together = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        np.testing.assert_allclose(
+            np.ma.filled(alone.fields["reflectivity"]["data"], np.nan),
+            np.ma.filled(together.fields["reflectivity"]["data"], np.nan),
+            equal_nan=True,
+        )
+
+    def test_carried_field_is_warped_not_copied(self):
+        """The carried variable must move with the flow, not pass through unchanged.
+
+        This is the test that would catch wiring the carried field straight from the
+        earlier volume: the blob translates, so a copy would sit at the start
+        position while the warp puts it half way.
+        """
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        warped = np.ma.filled(
+            result.fields["differential_reflectivity"]["data"].astype("float64"), np.nan
+        )
+        original = np.ma.filled(
+            earlier.fields["differential_reflectivity"]["data"].astype("float64"),
+            np.nan,
+        )
+        comparable = np.isfinite(warped) & np.isfinite(original)
+        assert not np.allclose(warped[comparable], original[comparable])
+
+    def test_carried_field_tracks_the_tracer_through_the_same_transform(self):
+        """The carried variable must go through the identical transform.
+
+        It is an affine function of the tracer in this fixture, so the
+        reconstruction must satisfy the same relation: identical motion, identical
+        resampling, identical blend weights.
+        """
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        tracer = np.ma.filled(
+            result.fields["reflectivity"]["data"].astype("float64"), np.nan
+        )
+        carried = np.ma.filled(
+            result.fields["differential_reflectivity"]["data"].astype("float64"), np.nan
+        )
+        both = np.isfinite(tracer) & np.isfinite(carried)
+        np.testing.assert_allclose(
+            carried[both], 0.1 * tracer[both] - 2.0, rtol=1e-9, atol=1e-9
+        )
+
+    def test_missing_carried_field_is_reported(self):
+        earlier, later = self._pair()
+        with pytest.raises(KeyError, match="absent_field"):
+            advection_interpolate(
+                earlier, later, alpha=0.5, carry_fields=["absent_field"]
+            )
+
+    def test_no_carry_fields_is_the_previous_behaviour(self):
+        """Default stays one field out, so existing callers are untouched."""
+        earlier, later = self._pair()
+        result = advection_interpolate(earlier, later, alpha=0.5)
+        assert set(result.fields) == {"reflectivity"}
