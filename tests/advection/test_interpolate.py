@@ -24,7 +24,7 @@ The tests are organised around the three things that can independently be wrong:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
@@ -488,6 +488,112 @@ class TestTargetTimeSelection:
             field_array(default), field_array(explicit), atol=1e-6
         )
 
+    def test_accepts_a_naive_target_time(self, bracketing_volumes):
+        """The most natural call a Py-ART user can make must work.
+
+        ``pyart.util.datetime_from_radar`` returns a *naive* datetime while
+        :func:`volume_reference_time` returns a UTC-aware one, so building a target
+        from the former and passing it here used to raise
+
+            TypeError: can't subtract offset-naive and offset-aware datetimes
+
+        The existing tests all built the target from ``volume_reference_time``, so
+        they were aware-on-aware and never reached this. CF times are UTC by
+        construction, so a naive target is interpreted as UTC rather than rejected.
+        """
+        earlier, later, _ = bracketing_volumes
+        aware = volume_reference_time(earlier)
+        span = (volume_reference_time(later) - aware).total_seconds()
+        aware_target = aware + timedelta(seconds=0.5 * span)
+        naive_target = aware_target.replace(tzinfo=None)
+        assert naive_target.tzinfo is None
+
+        from_naive = advection_interpolate(
+            earlier,
+            later,
+            target_time=naive_target,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        from_aware = advection_interpolate(
+            earlier,
+            later,
+            target_time=aware_target,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        np.testing.assert_allclose(
+            field_array(from_naive), field_array(from_aware), atol=1e-6
+        )
+
+    def test_naive_and_aware_targets_agree_off_the_midpoint(self, bracketing_volumes):
+        """Not just at alpha=0.5, where a sign or offset slip would cancel."""
+        earlier, later, _ = bracketing_volumes
+        aware = volume_reference_time(earlier)
+        span = (volume_reference_time(later) - aware).total_seconds()
+        target = aware + timedelta(seconds=0.25 * span)
+        from_naive = advection_interpolate(
+            earlier,
+            later,
+            target_time=target.replace(tzinfo=None),
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        from_alpha = advection_interpolate(
+            earlier,
+            later,
+            alpha=0.25,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        np.testing.assert_allclose(
+            field_array(from_naive), field_array(from_alpha), atol=1e-6
+        )
+
+    def test_accepts_a_cftime_target(self, bracketing_volumes):
+        """The type ``pyart.util.datetime_from_radar`` actually returns.
+
+        It is a ``cftime.DatetimeGregorian``, which is *not* a
+        :class:`datetime.datetime` subclass and whose ``replace()`` rejects
+        ``tzinfo`` outright. A first version of this fix normalised with
+        ``target_time.replace(tzinfo=UTC)`` and passed the naive-datetime test above
+        while still raising on real Py-ART input, so the two cases are pinned
+        separately.
+        """
+        cftime = pytest.importorskip("cftime")
+        earlier, later, _ = bracketing_volumes
+        aware = volume_reference_time(earlier)
+        span = (volume_reference_time(later) - aware).total_seconds()
+        midpoint = aware + timedelta(seconds=0.5 * span)
+        target = cftime.DatetimeGregorian(
+            midpoint.year,
+            midpoint.month,
+            midpoint.day,
+            midpoint.hour,
+            midpoint.minute,
+            midpoint.second,
+            midpoint.microsecond,
+        )
+        assert not isinstance(target, datetime)
+
+        from_cftime = advection_interpolate(
+            earlier,
+            later,
+            target_time=target,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        from_alpha = advection_interpolate(
+            earlier,
+            later,
+            alpha=0.5,
+            grid_shape=FLOW_GRID_SHAPE,
+            grid_limits=FLOW_GRID_LIMITS,
+        )
+        np.testing.assert_allclose(
+            field_array(from_cftime), field_array(from_alpha), atol=1e-6
+        )
+
     def test_rejects_a_missing_field(self, bracketing_volumes):
         earlier, later, _ = bracketing_volumes
         with pytest.raises(KeyError, match="velocity"):
@@ -547,3 +653,206 @@ class TestObjectFlavours:
             grid_limits=FLOW_GRID_LIMITS,
         )
         assert isinstance(result, pyart.core.Radar)
+
+
+@requires_skimage
+class TestRepeatedAzimuths:
+    """A real antenna sometimes records the same azimuth twice in one sweep.
+
+    Measured on ARM C-SAPR2: 3 of 195 sweeps across 13 consecutive volumes contain
+    one duplicated azimuth, which is what a brief dwell looks like in the data. A
+    synthetic volume built from ``arange`` never does, so this went unnoticed until
+    the operator was run on a real sequence.
+
+    It matters because :func:`_sample_sweep` tiles the azimuth axis at -360, 0 and
+    +360 degrees to make the 0/360 seam interpolate correctly, and
+    ``RegularGridInterpolator`` requires that axis to be *strictly* ascending.
+    Sorting puts duplicates adjacent, so a single repeat makes the whole
+    reconstruction raise rather than degrade.
+    """
+
+    def _volume_with_duplicate_azimuth(self, offset_east_m, start_second=0.0):
+        """A translating volume whose first sweep repeats one azimuth."""
+        radar = make_translating_volume(offset_east_m, start_second=start_second)
+        azimuths = radar.azimuth["data"].copy()
+        # duplicate ray 10 onto ray 11 within the first sweep
+        azimuths[11] = azimuths[10]
+        radar.azimuth["data"] = azimuths
+        return radar
+
+    def test_duplicate_azimuth_does_not_raise(self):
+        """The case real data presents: one repeated azimuth in one sweep."""
+        earlier = self._volume_with_duplicate_azimuth(0.0)
+        later = self._volume_with_duplicate_azimuth(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        result = advection_interpolate(earlier, later, alpha=0.5)
+        assert "reflectivity" in result.fields
+
+    def test_duplicate_azimuth_gives_a_usable_field(self):
+        """Not merely non-raising: the reconstruction must still carry echo."""
+        earlier = self._volume_with_duplicate_azimuth(0.0)
+        later = self._volume_with_duplicate_azimuth(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        values = advection_interpolate(earlier, later, alpha=0.5).fields[
+            "reflectivity"
+        ]["data"]
+        finite = np.isfinite(np.ma.filled(values.astype("float64"), np.nan))
+        assert finite.mean() > 0.5
+        assert np.nanmax(np.ma.filled(values.astype("float64"), np.nan)) > 10.0
+
+    def test_many_duplicates_still_work(self):
+        """Degenerate but legal: a sweep that dwells repeatedly."""
+        earlier = make_translating_volume(0.0)
+        later = make_translating_volume(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        for radar in (earlier, later):
+            azimuths = radar.azimuth["data"].copy()
+            azimuths[5:15] = azimuths[5]
+            radar.azimuth["data"] = azimuths
+        result = advection_interpolate(earlier, later, alpha=0.5)
+        assert "reflectivity" in result.fields
+
+    def test_duplicate_free_input_is_unaffected(self):
+        """The fix must not perturb the well-behaved case.
+
+        Reconstructing from strictly-ascending azimuths must give bit-identical
+        output before and after de-duplication, since there is nothing to remove.
+        """
+        earlier = make_translating_volume(0.0)
+        later = make_translating_volume(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        first = advection_interpolate(earlier, later, alpha=0.5).fields["reflectivity"][
+            "data"
+        ]
+        second = advection_interpolate(earlier, later, alpha=0.5).fields[
+            "reflectivity"
+        ]["data"]
+        np.testing.assert_array_equal(
+            np.ma.filled(first, np.nan), np.ma.filled(second, np.nan)
+        )
+
+
+@requires_skimage
+class TestCarryFields:
+    """One motion field, several variables warped by it.
+
+    Polarimetric variables are not tracers. Differential reflectivity is a shape
+    measure, correlation coefficient is closer to a quality flag, and Doppler
+    velocity is signed and folded at the Nyquist interval -- estimating optical flow
+    from any of them would be tracking the wrong thing. Reflectivity is the tracer;
+    the motion it yields is a property of the *scene*, so the physically defensible
+    move is to estimate once and apply that displacement to every variable.
+
+    Calling the operator once per variable would instead derive a different motion
+    field from each, which is both wrong and four times the cost.
+    """
+
+    def _pair(self):
+        earlier = make_translating_volume(0.0)
+        later = make_translating_volume(
+            TOTAL_DISPLACEMENT_M, start_second=VOLUME_SEPARATION_S
+        )
+        for radar in (earlier, later):
+            reflectivity = np.ma.filled(
+                radar.fields["reflectivity"]["data"].astype("float64"), np.nan
+            )
+            # A companion variable with different units and a different sign
+            # convention, so a swap or a unit slip would show up.
+            radar.add_field(
+                "differential_reflectivity",
+                {
+                    "data": np.ma.masked_invalid(0.1 * reflectivity - 2.0),
+                    "units": "dB",
+                    "standard_name": "differential_reflectivity",
+                },
+            )
+        return earlier, later
+
+    def test_carried_field_appears_in_the_output(self):
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        assert set(result.fields) == {"reflectivity", "differential_reflectivity"}
+
+    def test_carried_field_keeps_its_own_metadata(self):
+        """A carried variable must not inherit the tracer's units."""
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        assert result.fields["differential_reflectivity"]["units"] == "dB"
+        assert result.fields["reflectivity"]["units"] != "dB"
+
+    def test_carrying_reproduces_a_separate_call_on_the_tracer(self):
+        """Adding a carried variable must not perturb the tracer's own result."""
+        earlier, later = self._pair()
+        alone = advection_interpolate(earlier, later, alpha=0.5)
+        together = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        np.testing.assert_allclose(
+            np.ma.filled(alone.fields["reflectivity"]["data"], np.nan),
+            np.ma.filled(together.fields["reflectivity"]["data"], np.nan),
+            equal_nan=True,
+        )
+
+    def test_carried_field_is_warped_not_copied(self):
+        """The carried variable must move with the flow, not pass through unchanged.
+
+        This is the test that would catch wiring the carried field straight from the
+        earlier volume: the blob translates, so a copy would sit at the start
+        position while the warp puts it half way.
+        """
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        warped = np.ma.filled(
+            result.fields["differential_reflectivity"]["data"].astype("float64"), np.nan
+        )
+        original = np.ma.filled(
+            earlier.fields["differential_reflectivity"]["data"].astype("float64"),
+            np.nan,
+        )
+        comparable = np.isfinite(warped) & np.isfinite(original)
+        assert not np.allclose(warped[comparable], original[comparable])
+
+    def test_carried_field_tracks_the_tracer_through_the_same_transform(self):
+        """The carried variable must go through the identical transform.
+
+        It is an affine function of the tracer in this fixture, so the
+        reconstruction must satisfy the same relation: identical motion, identical
+        resampling, identical blend weights.
+        """
+        earlier, later = self._pair()
+        result = advection_interpolate(
+            earlier, later, alpha=0.5, carry_fields=["differential_reflectivity"]
+        )
+        tracer = np.ma.filled(
+            result.fields["reflectivity"]["data"].astype("float64"), np.nan
+        )
+        carried = np.ma.filled(
+            result.fields["differential_reflectivity"]["data"].astype("float64"), np.nan
+        )
+        both = np.isfinite(tracer) & np.isfinite(carried)
+        np.testing.assert_allclose(
+            carried[both], 0.1 * tracer[both] - 2.0, rtol=1e-9, atol=1e-9
+        )
+
+    def test_missing_carried_field_is_reported(self):
+        earlier, later = self._pair()
+        with pytest.raises(KeyError, match="absent_field"):
+            advection_interpolate(
+                earlier, later, alpha=0.5, carry_fields=["absent_field"]
+            )
+
+    def test_no_carry_fields_is_the_previous_behaviour(self):
+        """Default stays one field out, so existing callers are untouched."""
+        earlier, later = self._pair()
+        result = advection_interpolate(earlier, later, alpha=0.5)
+        assert set(result.fields) == {"reflectivity"}

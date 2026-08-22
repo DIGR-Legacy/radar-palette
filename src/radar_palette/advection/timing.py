@@ -126,8 +126,9 @@ def interpolate_ray_times(radar_early, radar_late, alpha):
     ----------
     radar_early, radar_late : pyart.core.Radar
         Volumes bracketing the target instant, ``radar_early`` observed first.
-        Neither is modified. They must have the same number of rays; they need
-        *not* share a CF epoch.
+        Neither is modified. Their ray counts need not match, and they need *not*
+        share a CF epoch. Only ``radar_early``'s ray pattern and the two volumes'
+        reference times are used, so ``radar_late`` contributes one scalar.
     alpha : float
         Fractional position of the target between ``radar_early`` (0.0) and
         ``radar_late`` (1.0). Values outside ``[0, 1]`` extrapolate linearly.
@@ -142,14 +143,18 @@ def interpolate_ray_times(radar_early, radar_late, alpha):
     Raises
     ------
     ValueError
-        If the volumes have differing ray counts, or ``alpha`` is not finite.
-    """
-    if radar_early.nrays != radar_late.nrays:
-        raise ValueError(
-            "volumes must have the same number of rays to interpolate ray times; "
-            f"got {radar_early.nrays} and {radar_late.nrays}"
-        )
+        If ``alpha`` is not finite.
 
+    Notes
+    -----
+    Ray counts are deliberately *not* required to match. Consecutive volumes from
+    the same radar running the same strategy routinely differ by a ray or two --
+    measured on ARM C-SAPR2, three consecutive 15-sweep volumes gave 13955, 13951
+    and 13954 rays -- so an equality requirement rejects essentially every real
+    pair. Nothing below pairs rays between the volumes: the output carries
+    ``radar_early``'s acquisition pattern shifted by a single scalar derived from
+    the two reference times, so there is no correspondence to violate.
+    """
     alpha = float(alpha)
     if not np.isfinite(alpha):
         raise ValueError(f"alpha must be finite, got {alpha!r}")

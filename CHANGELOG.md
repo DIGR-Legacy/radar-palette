@@ -8,6 +8,19 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `advection_interpolate` gains `carry_fields`, warping several variables through a
+  single motion estimate. The flow must come from a tracer, and the polarimetric
+  variables are not tracers: differential reflectivity is a shape measure, copolar
+  correlation is closer to a quality flag, and Doppler velocity is signed and folded
+  at the Nyquist interval. One call now reconstructs reflectivity, velocity, ZDR and
+  RhoHV from one flow estimate and one gridding pass, each field keeping its own
+  metadata so units are not overwritten with the tracer's. `interp_field_name`
+  renames only the tracer. Folded velocity carries a documented caveat: the blend is
+  a weighted mean, so it flattens gates that cross a fold — 7.1% of echo gates above
+  15 dBZ on the ARM C-SAPR2 pair used to exercise this, against 20.4% of all valid
+  gates, the rest being noise. Dealias first if the interpolated velocity is to be
+  read quantitatively.
+
 - `grid_volume` gains `method={"pyart", "spectral"}`, wiring the spectral operator
   behind the public entry point. The FFT gridding capability is now complete end to
   end: sweep census, per-sweep spectral evaluation on its cone, and vertical
@@ -155,6 +168,34 @@ git tags via `setuptools-scm`.
   not caught.
 
 ### Fixed
+
+- `interpolate_ray_times` no longer requires the two volumes to have equal ray
+  counts. Consecutive volumes running the *same* scan strategy do not repeat their
+  ray count — measured 13955 / 13951 / 13954 on one ARM C-SAPR2 triple — so the
+  guard rejected essentially every real pair. The arithmetic never needed it: the
+  output carries the earlier volume's acquisition pattern shifted by a single scalar
+  derived from the two reference times, so `radar_late` contributes no per-ray
+  correspondence to violate.
+- `target_time` now accepts a naive or `cftime` instant. `volume_reference_time`
+  returns a UTC-aware time but `pyart.util.datetime_from_radar` returns a naive
+  `cftime.DatetimeGregorian`, so building a target from a Py-ART time -- the most
+  natural call a Py-ART user can make -- raised `TypeError: can't subtract
+  offset-naive and offset-aware datetimes`. A naive target is now read as UTC, which
+  CF times are by construction, matching the rule already applied to decoded ray
+  times. The normalisation rebuilds the instant field by field rather than calling
+  `replace(tzinfo=UTC)`, because `cftime.DatetimeGregorian` is not a
+  `datetime.datetime` subclass and its `replace()` rejects `tzinfo`.
+- `_sweep_sampler` now collapses repeated azimuths instead of raising. A real
+  antenna records the same azimuth twice when it dwells — 3 of 195 sweeps across 13
+  consecutive volumes — and the sorted-but-not-deduplicated axis made the wrap
+  tiling in `_sample_sweep` non-strictly-ascending, which `RegularGridInterpolator`
+  rejects outright. Duplicates are averaged rather than discarded: they are
+  independent samples of the same beam position. Note the azimuths are otherwise
+  well behaved, with zero non-monotonic sweeps once the 360° wrap is accounted for,
+  so deduplication is the fix rather than resorting.
+
+  Both were found by running the operator on a real volume sequence for the first
+  time, and neither is reachable from synthetic volumes built on `arange`.
 
 - Documented, with measured values, that `pyart.core.cartesian_to_antenna` is not
   the inverse of `pyart.core.antenna_to_cartesian`: the forward transform returns

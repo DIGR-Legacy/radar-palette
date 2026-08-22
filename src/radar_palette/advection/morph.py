@@ -46,6 +46,7 @@ interval before the instant it depicts.
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -93,14 +94,39 @@ def _extend_over_no_echo(displacement, echo_mask):
 
 
 def _sweep_sampler(radar, sweep, field):
-    """Azimuth-sorted (azimuth, range, values) for one sweep, ready to interpolate."""
+    """Azimuth-sorted (azimuth, range, values) for one sweep, ready to interpolate.
+
+    Repeated azimuths are collapsed to one ray, averaging the rays that share an
+    angle. A real antenna does record the same azimuth twice -- measured on ARM
+    C-SAPR2, 3 of 195 sweeps across 13 consecutive volumes contain one duplicate,
+    which is what a brief dwell looks like in the data -- and the interpolator built
+    in :func:`_sample_sweep` needs a *strictly* ascending axis, so a single repeat
+    would otherwise make the whole reconstruction raise. Averaging rather than
+    discarding keeps both measurements: they are independent samples of the same
+    beam position, so their mean is the better estimate of it.
+    """
     start, end = radar.get_start_end(sweep)
     azimuths = radar.azimuth["data"][start : end + 1]
     values = np.ma.filled(
         radar.fields[field]["data"][start : end + 1].astype("float64"), np.nan
     )
     order = np.argsort(azimuths)
-    return azimuths[order], radar.range["data"], values[order]
+    azimuths, values = azimuths[order], values[order]
+
+    unique_azimuths, inverse = np.unique(azimuths, return_inverse=True)
+    if unique_azimuths.size != azimuths.size:
+        # nanmean per group: a duplicated ray may be masked in one copy and not the
+        # other, and an all-nan group must stay nan rather than becoming zero.
+        finite = np.isfinite(values)
+        totals = np.zeros((unique_azimuths.size, values.shape[1]))
+        counts = np.zeros_like(totals)
+        np.add.at(totals, inverse, np.where(finite, values, 0.0))
+        np.add.at(counts, inverse, finite)
+        with np.errstate(invalid="ignore"):
+            values = np.where(counts > 0, totals / counts, np.nan)
+        azimuths = unique_azimuths
+
+    return azimuths, radar.range["data"], values
 
 
 def _sample_sweep(azimuths_deg, ranges_m, sampler):
@@ -128,11 +154,36 @@ def _sample_sweep(azimuths_deg, ranges_m, sampler):
 
 
 def _resolve_alpha(earlier, later, alpha, target_time):
-    """Fractional position of the target between the two volumes."""
+    """Fractional position of the target between the two volumes.
+
+    A *naive* ``target_time`` is read as UTC rather than rejected. CF times are UTC
+    by construction and :func:`volume_reference_time` returns an aware instant, but
+    ``pyart.util.datetime_from_radar`` returns a naive one -- so building a target
+    from a Py-ART time and passing it here used to raise ``TypeError: can't subtract
+    offset-naive and offset-aware datetimes``. That is the most natural call a
+    Py-ART user can make. This mirrors the rule already applied to decoded ray times
+    in :func:`radar_palette.advection.timing._decode_ray_times`.
+
+    The normalisation rebuilds the instant field by field rather than calling
+    ``replace(tzinfo=UTC)``, because Py-ART hands back a ``cftime.DatetimeGregorian``
+    -- not a :class:`datetime.datetime` subclass, and its ``replace()`` rejects
+    ``tzinfo`` outright.
+    """
     if alpha is not None:
         return float(alpha)
     if target_time is None:
         return 0.5
+    if getattr(target_time, "tzinfo", None) is None:
+        target_time = datetime(
+            target_time.year,
+            target_time.month,
+            target_time.day,
+            target_time.hour,
+            target_time.minute,
+            target_time.second,
+            target_time.microsecond,
+            tzinfo=UTC,
+        )
     earlier_time = volume_reference_time(earlier)
     span_s = (volume_reference_time(later) - earlier_time).total_seconds()
     if span_s == 0.0:
@@ -149,6 +200,7 @@ def advection_interpolate(
     alpha=None,
     target_time=None,
     field=None,
+    carry_fields=None,
     output_flavor=None,
     grid_shape=DEFAULT_FLOW_GRID_SHAPE,
     grid_limits=DEFAULT_FLOW_GRID_LIMITS,
@@ -171,7 +223,30 @@ def advection_interpolate(
         Absolute target time, converted to ``alpha`` using the volumes' reference
         times. Ignored when ``alpha`` is given.
     field : str, optional
-        Field to interpolate. Defaults to ``"reflectivity"``.
+        Field to interpolate, and the **tracer** the motion is estimated from.
+        Defaults to ``"reflectivity"``.
+    carry_fields : sequence of str, optional
+        Additional fields to warp through the *same* motion, resampling and blend.
+        The motion is a property of the scene, not of the variable, so estimating it
+        once from the tracer and applying it to every variable is both cheaper and
+        more defensible than calling this function once per field --- which would
+        derive a different motion field from each.
+
+        This matters most for polarimetric variables, none of which is a tracer:
+        differential reflectivity is a shape measure, correlation coefficient is
+        closer to a quality flag, and Doppler velocity is signed and folded at the
+        Nyquist interval. Tracking any of them would be tracking the wrong thing.
+
+        Each carried field keeps its own metadata, so units are not overwritten with
+        the tracer's. ``interp_field_name`` renames only the tracer.
+
+        Caveat for **folded velocity**: the blend is a weighted mean, so averaging
+        values either side of the Nyquist interval gives an answer near zero where
+        the truth wraps. Measured on ARM C-SAPR2, gates whose velocity changes by
+        more than one Nyquist interval between scans are 7.1% within echo above
+        15 dBZ but 20.4% across all valid gates, the rest being noise. Dealias
+        before carrying velocity if the interpolated values are to be read
+        quantitatively.
     output_flavor : {"pyart", "xradar"}, optional
         Object family to return. Defaults to mirroring the input.
     grid_shape, grid_limits : optional
@@ -189,15 +264,15 @@ def advection_interpolate(
     Returns
     -------
     pyart.core.Radar or xarray.DataTree
-        A volume on ``earlier``'s geometry, carrying the reconstructed field and the
-        acquisition time it represents.
+        A volume on ``earlier``'s geometry, carrying the reconstructed tracer field,
+        any carried fields, and the acquisition time it represents.
 
     Raises
     ------
     ImportError
         If scikit-image is not installed.
     KeyError
-        If ``field`` is absent from either volume.
+        If ``field`` or any of ``carry_fields`` is absent from either volume.
 
     Notes
     -----
@@ -214,9 +289,13 @@ def advection_interpolate(
 
     if field is None:
         field = "reflectivity"
+    carried = list(carry_fields or ())
     for name, radar in (("earlier", earlier_radar), ("later", later_radar)):
-        if field not in radar.fields:
-            raise KeyError(f"field {field!r} is not present in the {name} volume")
+        for required in (field, *carried):
+            if required not in radar.fields:
+                raise KeyError(
+                    f"field {required!r} is not present in the {name} volume"
+                )
 
     alpha = _resolve_alpha(earlier_radar, later_radar, alpha, target_time)
 
@@ -266,9 +345,16 @@ def advection_interpolate(
         fill_value=None,
     )
 
-    reconstructed = np.full(
-        (earlier_radar.nrays, earlier_radar.ngates), np.nan, dtype="float64"
-    )
+    # One array per variable being warped. The motion is a property of the scene,
+    # estimated once from the tracer above, so every variable moves through exactly
+    # the same displacement, resampling and blend.
+    warped_names = [field, *carried]
+    reconstructed = {
+        name: np.full(
+            (earlier_radar.nrays, earlier_radar.ngates), np.nan, dtype="float64"
+        )
+        for name in warped_names
+    }
     gate_east_all = earlier_radar.gate_x["data"]
     gate_north_all = earlier_radar.gate_y["data"]
     gate_up_all = earlier_radar.gate_z["data"]
@@ -301,31 +387,44 @@ def advection_interpolate(
         later_east = gate_east + (1.0 - alpha) * gate_displacement_east
         later_north = gate_north + (1.0 - alpha) * gate_displacement_north
 
-        from_earlier = _sample_sweep(
-            np.rad2deg(np.arctan2(earlier_east, earlier_north)) % 360.0,
-            np.hypot(earlier_east, earlier_north) / cos_elevation,
-            _sweep_sampler(earlier_radar, sweep, field),
-        )
-        from_later = _sample_sweep(
-            np.rad2deg(np.arctan2(later_east, later_north)) % 360.0,
-            np.hypot(later_east, later_north) / cos_elevation,
-            _sweep_sampler(later_radar, sweep, field),
-        )
+        earlier_azimuths = np.rad2deg(np.arctan2(earlier_east, earlier_north)) % 360.0
+        earlier_ranges = np.hypot(earlier_east, earlier_north) / cos_elevation
+        later_azimuths = np.rad2deg(np.arctan2(later_east, later_north)) % 360.0
+        later_ranges = np.hypot(later_east, later_north) / cos_elevation
 
-        both_valid = np.isfinite(from_earlier) & np.isfinite(from_later)
-        blended = (1.0 - alpha) * from_earlier + alpha * from_later
-        # Where only one volume reached the gate, use it rather than discarding the
-        # gate: a one-sided estimate beats a hole at the edge of coverage.
-        reconstructed[start : end + 1] = np.where(
-            both_valid,
-            blended,
-            np.where(np.isfinite(from_earlier), from_earlier, from_later),
-        )
+        for name in warped_names:
+            from_earlier = _sample_sweep(
+                earlier_azimuths,
+                earlier_ranges,
+                _sweep_sampler(earlier_radar, sweep, name),
+            )
+            from_later = _sample_sweep(
+                later_azimuths,
+                later_ranges,
+                _sweep_sampler(later_radar, sweep, name),
+            )
+
+            both_valid = np.isfinite(from_earlier) & np.isfinite(from_later)
+            blended = (1.0 - alpha) * from_earlier + alpha * from_later
+            # Where only one volume reached the gate, use it rather than discarding
+            # the gate: a one-sided estimate beats a hole at the edge of coverage.
+            reconstructed[name][start : end + 1] = np.where(
+                both_valid,
+                blended,
+                np.where(np.isfinite(from_earlier), from_earlier, from_later),
+            )
 
     output = copy.deepcopy(earlier_radar)
-    field_dict = dict(earlier_radar.fields[field])
-    field_dict["data"] = np.ma.masked_invalid(reconstructed)
-    output.fields = {interp_field_name or field: field_dict}
+    output_fields = {}
+    for name in warped_names:
+        # Each variable keeps its OWN metadata: units, standard_name, valid range.
+        # Copying the tracer's would mislabel a carried variable as dBZ.
+        field_dict = dict(earlier_radar.fields[name])
+        field_dict["data"] = np.ma.masked_invalid(reconstructed[name])
+        # interp_field_name renames only the tracer; carried variables keep theirs,
+        # since renaming several outputs from one string is not well defined.
+        output_fields[interp_field_name or name if name == field else name] = field_dict
+    output.fields = output_fields
 
     # The volume represents an instant that was never observed; give it that instant
     # rather than the clock inherited from the deepcopy above.
