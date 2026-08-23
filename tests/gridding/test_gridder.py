@@ -398,6 +398,126 @@ class TestWhyTheDefaultIsPyart:
         assert np.nanmin(values) >= self.WEDGE_LOW_DBZ - self.ROUNDING_TOLERANCE_DB
 
 
+class TestDistanceWeightingLeavesInterConeGaps:
+    """The other half of the trade-off, and the half that is easy to miss.
+
+    :class:`TestWhyTheDefaultIsPyart` measures what the spectral path costs: it rings
+    at a discontinuity. This class measures what the *default* path costs, which the
+    module docstring described only as degrading "gracefully".
+
+    It does not degrade gracefully. A radius of influence is a fixed length, while the
+    vertical separation between adjacent tilts grows with range. Wherever the
+    separation exceeds the radius no gate is within reach, and the cell is left empty
+    --- an interior hole, with valid data both above and below it in the same column.
+
+    This is not a mis-set parameter: Py-ART's own defaults for ``roi_func="dist_beam"``
+    produce it, which is why it earns a test rather than a comment.
+    """
+
+    GRID_SHAPE = (24, 41, 41)
+    GRID_LIMITS = ((500.0, 12_000.0), (-30_000.0, 30_000.0), (-30_000.0, 30_000.0))
+
+    @staticmethod
+    def _interior_holes(section):
+        """Count empty cells that have data both above and below in the same column.
+
+        A gap at the top or bottom of a column is a coverage limit and is expected. A
+        gap *between* two valid samples is the operator failing to reach.
+        """
+        total = 0
+        for column in range(section.shape[1]):
+            valid = np.isfinite(section[:, column])
+            if valid.sum() < 2:
+                continue
+            first = int(np.argmax(valid))
+            last = len(valid) - 1 - int(np.argmax(valid[::-1]))
+            total += int((~valid[first : last + 1]).sum())
+        return total
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def wide_gap_volume(cls):
+        """Tilts spaced so the cone separation outruns a fixed radius."""
+        return make_volume(fixed_angles=(0.5, 4.0, 10.0, 20.0), nrays=180, ngates=120)
+
+    def _grid(self, volume, **roi_kwargs):
+        grid = grid_volume(
+            volume,
+            grid_shape=self.GRID_SHAPE,
+            grid_limits=self.GRID_LIMITS,
+            method="pyart",
+            fields=["reflectivity"],
+            weighting_function="Barnes2",
+            **roi_kwargs,
+        )
+        values = np.ma.filled(grid.fields["reflectivity"]["data"].astype(float), np.nan)
+        return values
+
+    def _mid_section(self, values):
+        return values[:, values.shape[1] // 2, :]
+
+    def test_beam_width_roi_leaves_interior_holes(self, wide_gap_volume):
+        """The documented default leaves holes between cones."""
+        section = self._mid_section(self._grid(wide_gap_volume, roi_func="dist_beam"))
+        assert self._interior_holes(section) > 0
+
+    def test_pyart_defaults_leave_them_too(self, wide_gap_volume):
+        """Not a mis-set parameter: passing no ROI arguments does the same thing.
+
+        Pinned because the natural reading of a hole-riddled section is that the
+        caller chose badly. Py-ART's own defaults produce it, so the honest statement
+        is about the operator, not about the arguments.
+        """
+        explicit = self._interior_holes(
+            self._mid_section(self._grid(wide_gap_volume, roi_func="dist_beam"))
+        )
+        implicit = self._interior_holes(self._mid_section(self._grid(wide_gap_volume)))
+        assert implicit > 0
+        assert implicit == explicit
+
+    def test_a_wider_radius_closes_them(self, wide_gap_volume):
+        """A radius large enough to span the cone separation fills the gaps."""
+        narrow = self._interior_holes(
+            self._mid_section(self._grid(wide_gap_volume, roi_func="dist_beam"))
+        )
+        wide = self._interior_holes(
+            self._mid_section(
+                self._grid(wide_gap_volume, roi_func="constant", constant_roi=4000.0)
+            )
+        )
+        assert wide < narrow
+
+    def test_closing_the_holes_costs_peak_intensity(self, wide_gap_volume):
+        """The trade-off itself, asserted so it cannot be quietly forgotten.
+
+        Widening the radius averages over a larger neighbourhood: it fills more cells
+        *and* attenuates the peak. Both directions are asserted, because a claim that
+        one setting is simply better would be wrong.
+        """
+        narrow = self._grid(wide_gap_volume, roi_func="dist_beam")
+        wide = self._grid(wide_gap_volume, roi_func="constant", constant_roi=4000.0)
+        assert np.isfinite(wide).mean() > np.isfinite(narrow).mean()
+        assert np.nanmax(wide) < np.nanmax(narrow)
+
+    def test_the_spectral_path_has_no_interior_holes(self, wide_gap_volume):
+        """The contrast that makes this a trade-off rather than a defect.
+
+        Vertical assembly interpolates between whichever cones bracket the target
+        height, so a separation wider than any fixed radius is not a problem for it.
+        It declines to extrapolate *beyond* the outermost cones, which is a different
+        thing and is what ``coverage_flag`` reports.
+        """
+        grid = grid_volume(
+            wide_gap_volume,
+            grid_shape=self.GRID_SHAPE,
+            grid_limits=self.GRID_LIMITS,
+            method="spectral",
+            field_name="reflectivity",
+        )
+        values = np.ma.filled(grid.fields["reflectivity"]["data"].astype(float), np.nan)
+        assert self._interior_holes(self._mid_section(values)) == 0
+
+
 class TestFlavourAndMethodCompose:
     """Both axes of the public contract are independent and must stay that way.
 

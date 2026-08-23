@@ -6,6 +6,18 @@ git tags via `setuptools-scm`.
 
 ## [Unreleased]
 
+### Changed
+
+- The `gridding` module docstring no longer claims the distance-weighted path "degrades
+  gracefully where sampling is poor". It does not: the radius of influence is a fixed
+  length while the separation between adjacent tilts grows with range, so beyond a certain
+  range no gate is in reach and columns develop interior holes. Py-ART's own `dist_beam`
+  defaults leave 570 of them in one vertical section of a C-SAPR2 volume. The docstring now
+  carries the measured coverage-versus-peak trade-off and points at `roi_func`, and
+  `grid_volume` documents that argument as the consequential one for the `"pyart"` backing.
+  Five tests in `TestDistanceWeightingLeavesInterConeGaps` pin the behaviour, including that
+  the Py-ART defaults reproduce it and that closing the gaps costs peak intensity.
+
 ### Added
 
 - `advection_interpolate` gains `carry_fields`, warping several variables through a

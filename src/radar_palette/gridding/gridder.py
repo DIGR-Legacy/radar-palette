@@ -20,8 +20,51 @@ The spectral path is **opt-in**, and that is a deliberate choice rather than cau
 about new code. The two operators answer different questions:
 
 *Cressman weighting* smooths. It cannot resolve a gradient sharper than its radius of
-influence, but it also cannot overshoot, and it degrades gracefully where sampling is
-poor.
+influence, but it also cannot overshoot: a weighted average of gates cannot leave the
+range of its inputs.
+
+It does not, however, degrade gracefully where sampling is poor. The radius of influence
+is a fixed length while the vertical separation between adjacent tilts grows with range,
+so beyond the range where the separation exceeds the radius no gate is within reach
+and the cell is empty --- an interior hole, with valid data both above and below it
+in the same column. On a C-SAPR2 volume (15 tilts, 1.5 to 42 degrees) gridded at
+500 m over a 60 km box, ``roi_func="dist_beam"`` fills 70.7% of cells and leaves
+570 interior holes in a single vertical section; the widest tilt pair is separated
+by eleven times the radius at far range. Py-ART's own defaults produce the same
+result, so this is a property of the operator rather than a mis-set argument.
+
+Widening the radius closes the holes and costs peak intensity, monotonically. Measured
+on the same volume against an observed maximum of 68.0 dBZ:
+
+.. list-table::
+   :header-rows: 1
+
+   * - ``roi_func``
+     - filled
+     - interior holes
+     - peak
+   * - ``dist_beam`` (Py-ART default)
+     - 70.7%
+     - 570
+     - 63.1 dBZ
+   * - ``dist``, ``z_factor=0.1``
+     - 95.1%
+     - 6
+     - 57.0 dBZ
+   * - ``dist``, ``z_factor=0.2``
+     - 96.3%
+     - 0
+     - 53.1 dBZ
+   * - ``constant_roi=4000.0``
+     - 98.3%
+     - 0
+     - 43.0 dBZ
+
+Closing the gaps entirely costs 15 dB of peak; the spectral path reaches zero interior
+holes at a cost of 4.7 dB, because vertical assembly interpolates between whichever
+cones bracket the target height rather than reaching a fixed distance. Callers who
+need filled columns from the default path should pass an explicit ``roi_func`` and
+choose where on that trade-off to sit.
 
 *The spectral operator* is exact where the sampling supports it --- no window, no taper
 --- but a band-limited interpolant rings at a discontinuity. Measured through this
@@ -290,6 +333,10 @@ def grid_volume(
     **gridding_kwargs
         Passed to the chosen backing. For ``"spectral"`` these are ``field_name``,
         ``scheme``, ``band_frac``, ``n_cg``, ``fill_method``, ``up_az`` and ``up_r``.
+        For ``"pyart"`` these reach :func:`pyart.map.grid_from_radars` unchanged, and
+        ``roi_func`` is the consequential one: the default beam-width radius leaves
+        interior holes between widely separated tilts. See the module docstring for the
+        measured trade-off between coverage and peak intensity.
 
     Returns
     -------
