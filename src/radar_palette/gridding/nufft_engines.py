@@ -42,10 +42,12 @@ Engines
 ``ducc0``
     The same transforms from ``ducc0.nufft``, batched over gates and
     multithreaded internally. Included for accuracy parity with ``finufft``, not
-    for speed: measured on these sweep shapes it is the **slowest** engine here
-    (2-4x the reference on ``cg``), because a radar azimuth axis is short enough
-    that its per-call setup dominates the transform it is setting up for. Reach
-    for it if you want ``finufft`` accuracy without the ``finufft`` dependency.
+    for speed: measured on these sweep shapes it is the **slowest** engine here,
+    taking 1.5-4.1x the reference's time on ``cg`` (worst at 360 x 1832, best at
+    the largest shape, where the gap narrows as the transform starts to dominate).
+    A radar azimuth axis is short enough that its per-call setup costs more than
+    the transform it is setting up for. Reach for it if you want ``finufft``
+    accuracy without the ``finufft`` dependency.
 ``torch``
     ``torchkbnufft``: genuinely Kaiser-Bessel (table-interpolated), batching range
     gates on the coil axis, and able to run on a GPU with ``device='cuda'``. The
