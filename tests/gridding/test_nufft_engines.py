@@ -153,7 +153,23 @@ class TestEngineRegistry:
         assert "scipy" in available
 
     def test_the_default_engine_needs_no_optional_dependency(self):
-        assert engines.DEFAULT_ENGINE in ("reference", "scipy")
+        """A minimal install must reach the default path.
+
+        Checked against the dependency map rather than a hard-coded list of names, so
+        that changing the default engine cannot silently make numpy/scipy-only
+        installs fail --- which a name list would have permitted.
+        """
+        assert engines._ENGINE_REQUIREMENTS[engines.DEFAULT_ENGINE] == ()
+
+    def test_the_default_solver_is_the_one_that_stays_physical(self):
+        """Pins the safety decision, not merely the current value.
+
+        ``cg`` reached -1907..2471 dBZ on a real volume at 25 iterations and 169 dBZ
+        on one cone at the old default of 12; ``direct`` takes an explicit
+        regularisation parameter instead of leaving an iteration count to do that job
+        implicitly.
+        """
+        assert engines.DEFAULT_SOLVER == "direct"
 
     def test_available_engines_is_a_subset_of_the_declared_set(self):
         assert set(engines.available_engines()) <= set(ALL_ENGINES)
@@ -593,23 +609,49 @@ class TestSectorConditioning:
 class TestEvaluatorWiring:
     """The evaluator must pass the choice through and report what it used."""
 
-    def test_the_default_path_is_unchanged_in_behaviour(self, jittered):
-        """Swapping the default engine must not move the evaluator's output.
+    def test_the_reference_path_is_still_reproducible_exactly(self, jittered):
+        """The old default must remain available and bit-comparable.
 
-        The whole justification for defaulting to ``scipy`` is that it is the
-        reference algorithm with exact substitutions. Measured end to end, on the
-        evaluated field rather than on the lattice.
+        This test used to assert that the *default* matched the reference to
+        round-off. That premise is deliberately gone: the default now uses the exact
+        DFT operator and a factorised solve, which is a different --- and on real data
+        better-behaved --- answer. What still has to hold is that a caller
+        reproducing earlier numbers can ask for the old path by name and get it.
         """
         geometry, azimuths, values, ngates = jittered
         gate_ranges = RANGE_FIRST_M + RANGE_SPACING_M * np.arange(ngates)
         azimuth_mesh, range_mesh = np.meshgrid(azimuths, gate_ranges, indexing="ij")
-        default = SweepSpectralEvaluator(values, geometry, azimuths).evaluate(
+        scipy_path = SweepSpectralEvaluator(
+            values, geometry, azimuths, az_engine="scipy", az_solver="cg"
+        ).evaluate(range_mesh, azimuth_mesh)
+        reference = SweepSpectralEvaluator(
+            values, geometry, azimuths, az_engine="reference", az_solver="cg"
+        ).evaluate(range_mesh, azimuth_mesh)
+        assert np.max(np.abs(scipy_path - reference)) < 1e-10 * np.ptp(reference)
+
+    def test_the_new_default_differs_from_the_old_one_by_a_bounded_amount(
+        self, jittered
+    ):
+        """Changing a default is only defensible if the size of the change is known.
+
+        Measured on this fixture the two agree to well under a tenth of a percent of
+        field range, so the change is not a silent re-scaling --- it is the removal of
+        the Kaiser-Bessel kernel error plus a regularised solve. The bound is asserted
+        in both directions: large enough to prove the default really did change,
+        small enough to prove it did not move the field.
+        """
+        geometry, azimuths, values, ngates = jittered
+        gate_ranges = RANGE_FIRST_M + RANGE_SPACING_M * np.arange(ngates)
+        azimuth_mesh, range_mesh = np.meshgrid(azimuths, gate_ranges, indexing="ij")
+        new_default = SweepSpectralEvaluator(values, geometry, azimuths).evaluate(
             range_mesh, azimuth_mesh
         )
-        reference = SweepSpectralEvaluator(
-            values, geometry, azimuths, az_engine="reference"
+        old_default = SweepSpectralEvaluator(
+            values, geometry, azimuths, az_engine="scipy", az_solver="cg"
         ).evaluate(range_mesh, azimuth_mesh)
-        assert np.max(np.abs(default - reference)) < 1e-10 * np.ptp(reference)
+        difference = np.max(np.abs(new_default - old_default)) / np.ptp(old_default)
+        assert difference > 1e-12
+        assert difference < 1e-3
 
     @pytest.mark.parametrize("engine", ALL_ENGINES)
     def test_the_engine_is_recorded_in_the_report(self, jittered, engine):

@@ -6,7 +6,34 @@ git tags via `setuptools-scm`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The spectral azimuth path now defaults to `az_engine='dense'`, `az_solver='direct'`.**
+  This changes numbers for existing callers, and it is a safety decision rather than a
+  performance one: the numbers it changes were partly wrong. Measured per cone on a
+  15-tilt ARM C-SAPR2 volume, the old `scipy`/`cg` default at `n_cg=12` had one tilt of
+  fifteen overshooting its input range by 107 dB and reaching 169 dBZ, and across a
+  resolution ramp the whole-volume range reached −299…297 dBZ. The new default holds
+  −99…66 dBZ on the same grids, with the other fourteen tilts within 1 dB.
+  - `n_cg` was acting as regularisation, not as a convergence budget, so a caller
+    raising it to improve the answer made it catastrophically worse (25 iterations:
+    −1907…2471 dBZ). The direct solver takes an explicit ridge instead.
+  - `dense` needs no dependency beyond numpy/scipy: on the azimuth axis the DFT matrix
+    is `n_rays × n_modes` and both are ray counts, so forming it exactly costs 8 MB at
+    720 rays and removes the Kaiser-Bessel kernel error.
+  - `az_engine='scipy', az_solver='cg'` reproduces the previous behaviour exactly,
+    `cg_resid_*` diagnostics included.
+
 ### Added
+
+- `EngineConcurrencyWarning` when `az_engine='finufft'` is combined with `n_jobs>1`.
+  finufft is correct there but unpredictable: measured on a 15-tilt volume at
+  `n_jobs=4`, three consecutive runs took 88.2, 6.5 and 16.3 s (13.6x spread) where
+  `dense` and `torch` held 1.0–1.1x on the identical path. Serially it is steady
+  (17.9 s over three runs; 0.29 s per tilt over six), so this is contention in
+  finufft's own global planner state rather than the transform being slow. Kept and
+  warned rather than serialised or removed — the results are correct, and silently
+  forcing `n_jobs=1` for one engine would make an engine comparison unfair.
 
 - `UnphysicalGridWarning` flags gridded fields that leave the range reflectivity can
   physically take. Measured on the ARM BNF C-SAPR2 volume, settings reachable

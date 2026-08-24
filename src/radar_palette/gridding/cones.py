@@ -276,6 +276,16 @@ MEMORY_HEADROOM_FRAC = 0.5
 # low side well above -100. Used only to decide whether to WARN -- the values are
 # left in place, because silently clipping would hide a settings problem behind a
 # plausible-looking field.
+class EngineConcurrencyWarning(UserWarning):
+    """An engine is being run concurrently that does not behave well that way.
+
+    Separate from :class:`UnphysicalGridWarning` because the consequence is
+    different in kind: the numbers are right, only the runtime is unpredictable. A
+    caller benchmarking engines wants to see this; one gridding a volume may not
+    care.
+    """
+
+
 class UnphysicalGridWarning(UserWarning):
     """The gridded field left the range its physical quantity can take.
 
@@ -295,6 +305,33 @@ PHYSICAL_DBZ_LIMITS = (-100.0, 100.0)
 # documented example, 7.5 dB at n_cg=12 on a convective volume) and catches the
 # regime where the solve has started to diverge instead.
 OVERSHOOT_WARN_DB = 25.0
+
+
+# Engines that are not safe to run concurrently. `finufft` is correct under the
+# thread pool but wildly variable: measured on a 15-tilt volume at n_jobs=4, three
+# consecutive runs took 88.2, 6.5 and 16.3 seconds (13.6x spread) where `dense` and
+# `torch` on the identical path held 1.0-1.1x. Serially it is perfectly steady
+# (17.9 s, 1.0x over three runs; 0.29 s per tilt over six), so this is contention in
+# finufft's own planner rather than the transform being slow -- its FFTW planning is
+# global state, and each concurrent tilt drags it around. Warned rather than
+# serialised or refused: the results are correct, the user may have measured their own
+# case, and quietly forcing n_jobs=1 for one engine would make an engine comparison
+# silently unfair.
+THREAD_UNSAFE_ENGINES = ("finufft",)
+
+
+def _check_engine_concurrency(az_engine, workers):
+    """Warn when an engine is being run concurrently that does not like it."""
+    if workers > 1 and az_engine in THREAD_UNSAFE_ENGINES:
+        warnings.warn(
+            f"az_engine={az_engine!r} with n_jobs>1 gives correct results but "
+            f"unpredictable timing: its planner holds global state, and measured "
+            f"across concurrent tilts the same work has varied by more than 10x run "
+            f"to run. Use n_jobs=1 to time it reproducibly, or az_engine='dense' "
+            f"(no extra dependency) or 'torch' for the parallel path.",
+            EngineConcurrencyWarning,
+            stacklevel=4,
+        )
 
 
 def _check_physical(reports, field_units):
@@ -650,6 +687,7 @@ def build_cones(
     workers, blas_threads = resolve_tilt_workers(
         n_jobs, len(indexed), half_width_m, spacing_m
     )
+    _check_engine_concurrency(az_engine, workers)
     if workers == 1:
         results = [grid_one_tilt(item) for item in indexed]
     else:

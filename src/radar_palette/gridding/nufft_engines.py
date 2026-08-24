@@ -20,12 +20,19 @@ Engines
 ``reference``
     :class:`~radar_palette.gridding.nufft._AzimuthNufftOperator`, unchanged. The
     definition of correct; the baseline every other engine is measured against.
-``dense``
+``dense`` **(default)**
     No interpolation kernel at all: the DFT matrix, formed explicitly. Sounds
     wasteful and is not, because on the azimuth axis the matrix is
     ``n_rays x n_modes`` and both are ray counts --- 8 MB at 720 rays. Exact to
     round-off, and the fastest engine measured on the 360-720 ray shapes
-    (``finufft`` wins at both ends of the range). **No new dependencies.**
+    (``finufft``
+    **Not safe to run concurrently.** Correct under ``n_jobs>1`` but wildly variable:
+    measured on a 15-tilt volume at ``n_jobs=4``, three consecutive runs took 88.2,
+    6.5 and 16.3 seconds where ``dense`` and ``torch`` held 1.0-1.1x on the identical
+    path. Serially it is steady (0.29 s per tilt over six runs), so this is contention
+    in its own global planner state. ``build_cones`` raises
+    :class:`~radar_palette.gridding.cones.EngineConcurrencyWarning` when the two are
+    combined. wins at both ends of the range). **No new dependencies.**
 ``scipy``
     The reference algorithm with two mechanical substitutions: the spreading
     stencil becomes one CSR sparse matrix (replacing ``numpy.add.at``, which is an
@@ -50,7 +57,10 @@ Engines
     accuracy without the ``finufft`` dependency.
 ``torch``
     ``torchkbnufft``: genuinely Kaiser-Bessel (table-interpolated), batching range
-    gates on the coil axis, and able to run on a GPU with ``device='cuda'``. The
+    gates on the coil axis, and the only engine here that can run on a GPU ---
+    ``device='cuda'`` on NVIDIA, ``device='mps'`` on Apple silicon. **The GPU path is
+    untested**: every figure in this module was measured on CPU, and the ~1.5 s edge
+    this engine shows there is a threading difference, not an algorithmic one. The
     CPU timings here are around the reference's; the reason to select it is an
     already-GPU-resident pipeline.
 
@@ -210,16 +220,30 @@ __all__ = [
     "make_operator",
 ]
 
-# The engine that reproduces the reference to round-off and needs no dependency
-# beyond the ones this package already requires.
-DEFAULT_ENGINE = "scipy"
+# The exact operator, and no dependency beyond the ones this package already
+# requires. Chosen over ``scipy`` (which reproduces nufft.py to round-off) because
+# the pair below is a safety decision, not a performance one -- see DEFAULT_SOLVER.
+# On the azimuth axis the DFT matrix is n_rays x n_modes and both are ray counts, so
+# forming it explicitly costs 8 MB at 720 rays and removes the Kaiser-Bessel kernel
+# error entirely.
+DEFAULT_ENGINE = "dense"
 
-# ``cg`` preserves the reference's behaviour and its ``cg_resid_*`` diagnostics
-# exactly. ``direct`` is faster on every engine, and far more accurate on the ones
-# whose transform is exact (see the module docstring), but changing the default
-# solve is a decision for the evaluator's own default, not for this module to make
-# silently.
-DEFAULT_SOLVER = "cg"
+# Changed from ``cg`` because the iterative default produces unphysical reflectivity
+# on real data. Measured on a 15-tilt ARM C-SAPR2 volume, per cone: at ``n_cg=12``
+# one tilt of fifteen overshoots its input range by 107 dB and reaches 169 dBZ,
+# visible in a gridded volume only when the vertical interpolation happens not to
+# discard those cells; across a resolution ramp the whole-volume range reached
+# -299..297 dBZ. ``direct`` with the default ridge holds -99..66 dBZ on the same
+# grids, with the other fourteen tilts within 1 dB of what ``cg`` gave them.
+#
+# This changes numbers for existing callers, which is why it was not done when the
+# solver was introduced. It is done now because the numbers it changes were partly
+# wrong: ``n_cg`` is acting as regularisation rather than as a convergence budget,
+# so a caller raising it to improve the answer makes it catastrophically worse (25
+# iterations: -1907..2471 dBZ), and no iteration count is a defensible substitute for
+# an explicit regularisation parameter. ``az_solver='cg'`` still reproduces the old
+# behaviour exactly, diagnostics included.
+DEFAULT_SOLVER = "direct"
 
 # Relative to trace(B) / n_lattice, so it is scale- and size-independent.
 #
@@ -1111,7 +1135,13 @@ class _TorchKbNufftEngine(_EngineBase):
     """``torchkbnufft`` table interpolation; range gates ride the coil axis.
 
     Genuinely Kaiser-Bessel, like the reference, and the only engine here that
-    runs on a GPU (``device='cuda'``). Note the phase convention: this library's
+    runs on a GPU. ``device`` is passed straight to ``torch``, so ``'cuda'``,
+    ``'mps'`` and ``'cpu'`` all work wherever the local build supports them; the
+    default is ``'cpu'`` and the GPU paths are unmeasured here. Note that
+    ``torchkbnufft`` defaults its tables to single precision, so a GPU run is also a
+    precision change unless ``complex128`` is requested --- worth checking against the
+    ``dense`` engine on your own data before trusting it. Note the phase convention:
+    this library's
     forward transform is ``exp(-i * omega * (k - N // 2))`` for image index ``k``.
     With ``k = m - mode_low`` and ``N = n_modes``, ``k - N // 2`` is exactly the
     signed mode ``m``, so passing ``omega = -phi`` yields the ``exp(+i m phi)``

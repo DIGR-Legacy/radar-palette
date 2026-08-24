@@ -222,9 +222,10 @@ class SweepSpectralEvaluator:
         Relative residual at which the refinement stops early.
     az_engine : str, optional
         Which NUFFT backend computes the transforms on the ``NON_UNIFORM`` path:
-        ``'scipy'`` (default, no dependency beyond numpy/scipy), ``'reference'``,
-        ``'dense'``, ``'finufft'``, ``'ducc0'`` or ``'torch'``. See
-        :mod:`radar_palette.gridding.nufft_engines`.
+        ``'dense'`` (default: the exact DFT operator, no dependency beyond
+        numpy/scipy), ``'scipy'``, ``'reference'``, ``'finufft'``, ``'ducc0'`` or
+        ``'torch'``. Note that ``'finufft'`` should not be combined with
+        ``n_jobs>1``; see :mod:`radar_palette.gridding.nufft_engines`.
 
         Only ``'reference'`` and ``'scipy'`` reproduce the existing implementation
         to round-off; for those two, choosing an engine is purely a performance
@@ -237,11 +238,17 @@ class SweepSpectralEvaluator:
         on a Kaiser-Bessel engine.
     az_solver : {'cg', 'direct'}, optional
         How the NUFFT path solves the density-weighted normal equations.
-        ``'cg'`` (default) is the existing conjugate-gradient refinement.
-        ``'direct'`` factorises the same system instead of iterating on it, which
-        on a measured band-limited field is roughly six orders of magnitude more
-        accurate and about 30x faster; it is not the default only because it
-        changes numbers a caller may be relying on.
+        ``'direct'`` (default) factorises the system once with an explicit
+        regularisation term. ``'cg'`` is the older conjugate-gradient refinement and
+        reproduces the pre-change behaviour exactly, ``cg_resid_*`` diagnostics
+        included.
+
+        The default is ``'direct'`` for safety rather than for speed. On a real
+        convective volume the iterative path produced unphysical reflectivity --- one
+        cone of fifteen overshooting its input range by 107 dB at the old
+        ``n_cg=12``, and -1907 to 2471 dBZ if a caller raises ``n_cg`` to 25 --- because
+        the iteration count was acting as regularisation rather than as a convergence
+        budget. See :mod:`radar_palette.gridding.nufft_engines` for the measurements.
     az_ridge : float or {'auto'}, optional
         Regularisation for ``az_solver='direct'``, relative to the mean diagonal
         of the normal matrix. Defaults to ``'auto'``, which derives it from the
