@@ -206,6 +206,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", help="write the timing table to this path")
     parser.add_argument(
+        "--real",
+        action="store_true",
+        help="held-out prediction error on real storm sweeps (downloads data)",
+    )
+    parser.add_argument(
         "--engines",
         nargs="*",
         help="engines to test (default: every installed engine)",
@@ -219,6 +224,29 @@ def main(argv=None):
             f"not installed: {sorted(missing)}; "
             f"available: {list(engines.available_engines())}"
         )
+
+    if arguments.real:
+        print("=== held-out prediction error on real reflectivity (dB) ===")
+        print("every 7th ray held out; lower is better")
+        rows = real_data()
+        print(
+            f"{'case':52s} {'solver':8s} {'ridge':>9} "
+            f"{'null':>5} {'median':>8} {'p95':>8}"
+        )
+        for row in rows:
+            ridge = "--" if np.isnan(row["ridge"]) else f"{row['ridge']:.1e}"
+            null = "--" if np.isnan(row["null_dim"]) else f"{int(row['null_dim'])}"
+            print(
+                f"{row['case']:52s} {row['solver']:8s} {ridge:>9} {null:>5} "
+                f"{row['median_dB']:>8.3f} {row['p95_dB']:>8.2f}"
+            )
+        if arguments.csv:
+            with open(arguments.csv, "w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            print(f"\nwrote {arguments.csv}")
+        return 0
 
     print(f"engines: {engine_names}")
     print(f"default: engine={engines.DEFAULT_ENGINE} solver={engines.DEFAULT_SOLVER}")
@@ -259,6 +287,139 @@ def main(argv=None):
             writer.writerows(timing_rows)
         print(f"\nwrote {arguments.csv}")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Real-data validation (--real).
+# --------------------------------------------------------------------------- #
+
+# Storm-filled low-tilt sweeps from open-radar-data. Selected by inspecting the
+# PPI: a clear-air or weak-stratiform sweep measures how well the operator
+# reproduces noise, which is not a number to tune a default against. Fractions
+# are of valid gates above 10 / 30 dBZ.
+REAL_CASES = (
+    (
+        "cfrad.20080604_002217_000_SPOL_v36_SUR.nc",
+        0,
+        "DBZ",
+        "SPOL S-band, convective line (26% >10 dBZ, max 58)",
+    ),
+    (
+        "swx_20120520_0641.nc",
+        0,
+        "corrected_reflectivity_horizontal",
+        "SWX C-band, widespread precip (81% >10 dBZ, max 80)",
+    ),
+    (
+        "corcsapr2cmacppiM1.c1.20181111.030003.nc",
+        0,
+        "corrected_reflectivity",
+        "CSAPR2 C-band, convective (33% >10 dBZ, max 68)",
+    ),
+)
+
+REAL_RIDGES = (1e-10, 1e-8, 1e-6, 1e-4, 1e-3, 1e-2, 1e-1, 1.0)
+HOLDOUT_STRIDE = 7
+
+
+class _FullCircle:
+    """Geometry for a held-out subset, which the census would not classify."""
+
+    def __init__(self, nrays, spacing):
+        self.nrays = nrays
+        self.is_full_360 = True
+        self.az_spacing_median_deg = spacing
+
+
+def _holdout(radar, sweep, field, stride=HOLDOUT_STRIDE):
+    """Split a real sweep into training rays and held-out rays.
+
+    Held-out rays are the only honest test of a regularisation choice: an
+    unregularised solve fits the rays it was given to round-off *because* it is
+    overfitting, so training residual ranks the choices exactly backwards.
+    """
+    from radar_palette.gridding.fill import fill_sweep
+
+    sl = radar.get_slice(sweep)
+    azimuths = radar.azimuth["data"][sl].astype(float) % 360.0
+    values = np.ma.asarray(radar.fields[field]["data"][sl]).astype(float)
+    order = np.argsort(azimuths)
+    azimuths, values = azimuths[order], values[order]
+
+    keep = np.ones(azimuths.size, dtype=bool)
+    keep[::stride] = False
+    training = np.asarray(fill_sweep(values[keep], method="floor"))
+    if not np.all(np.isfinite(training)):
+        return None
+    held_out = np.asarray(np.ma.filled(values[~keep], np.nan))
+    return azimuths[keep], training, azimuths[~keep], held_out
+
+
+def _predict(operator, lattice, azimuths_deg):
+    """Evaluate the recovered band-limited interpolant at unmeasured azimuths."""
+    modes = np.arange(operator.n_modes) + operator.mode_low
+    spectrum = operator._pad @ (np.fft.fft(lattice, axis=0) / operator.n_lattice)
+    basis = np.exp(1j * np.outer(np.deg2rad(azimuths_deg), modes))
+    return np.real(basis @ spectrum)
+
+
+def real_data(engine="dense"):
+    """Held-out prediction error on real reflectivity, per ridge and for CG."""
+    import pyart
+    from open_radar_data import DATASETS
+
+    rows = []
+    for filename, sweep, field, label in REAL_CASES:
+        radar = pyart.io.read(DATASETS.fetch(filename))
+        split = _holdout(radar, sweep, field)
+        if split is None:
+            continue
+        train_az, train_values, test_az, test_values = split
+        finite = np.isfinite(test_values)
+        geometry = _FullCircle(
+            train_az.size, float(np.median(np.diff(np.sort(train_az))))
+        )
+        operator = engines.make_operator(train_az, geometry, engine=engine)
+
+        def error(
+            lattice,
+            operator=operator,
+            test_az=test_az,
+            test_values=test_values,
+            finite=finite,
+        ):
+            predicted = _predict(operator, lattice, test_az)
+            deviation = np.abs(predicted[finite] - test_values[finite])
+            return float(np.median(deviation)), float(np.percentile(deviation, 95))
+
+        lattice, info = operator.solve(train_values, n_cg=12, solver="cg")
+        median, p95 = error(lattice)
+        rows.append(
+            {
+                "case": label,
+                "solver": "cg(12)",
+                "ridge": np.nan,
+                "null_dim": np.nan,
+                "median_dB": median,
+                "p95_dB": p95,
+            }
+        )
+
+        for ridge in REAL_RIDGES + ("auto",):
+            operator._normal_cache = None
+            lattice, info = operator.solve(train_values, solver="direct", ridge=ridge)
+            median, p95 = error(lattice)
+            rows.append(
+                {
+                    "case": label,
+                    "solver": "direct",
+                    "ridge": info["ridge_rel"],
+                    "null_dim": info["normal_null_dim"],
+                    "median_dB": median,
+                    "p95_dB": p95,
+                }
+            )
+    return rows
 
 
 if __name__ == "__main__":

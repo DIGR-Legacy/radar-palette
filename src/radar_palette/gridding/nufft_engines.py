@@ -136,6 +136,21 @@ not. At +/-0.45-spacing jitter, 12 iterations reach only 1.7e-2 on the ``scipy``
 engine against 4.5e-4 for the direct solve on the same transforms --- a 37x gain
 with no change of engine, and 4.3e7 with ``dense``.
 
+.. warning::
+
+   **Every figure in this section is on a synthetic band-limited field, and the
+   accuracy gain does not transfer to real reflectivity.** The table above is a
+   statement about which operator best represents a field this operator can
+   represent exactly. Real reflectivity is not such a field: speckle, clutter
+   and echo edges put energy in modes the sweep cannot determine. Measured by
+   held-out ray prediction on three storm-filled sweeps, the direct solve is
+   *comparable* to 12 CG iterations --- 6.70 dB against 7.80 (SPOL), 4.79
+   against 4.92 (SWX), 8.52 against 8.47 (CSAPR2) --- not orders better. On real
+   data the reasons to choose it are speed (10-30x) and having no iteration
+   count to tune. The ridge, not the solver, is what matters for accuracy there;
+   see :data:`DEFAULT_RIDGE`. Run ``benchmarks/bench_nufft_engines.py --real``
+   before quoting any accuracy figure from this module to a user.
+
 The ridge term is load-bearing, not cosmetic
 --------------------------------------------
 For a **sector**, ``n_lattice`` exceeds the ray count --- a 30-120 deg sector at
@@ -183,6 +198,8 @@ from radar_palette.gridding.nufft import (
 __all__ = [
     "DEFAULT_ENGINE",
     "DEFAULT_RIDGE",
+    "MIN_RIDGE",
+    "TARGET_CONDITION",
     "DEFAULT_SOLVER",
     "ENGINES",
     "SOLVERS",
@@ -202,11 +219,63 @@ DEFAULT_ENGINE = "scipy"
 # silently.
 DEFAULT_SOLVER = "cg"
 
-# Relative to trace(B) / n_lattice, so it is scale- and size-independent. Large
-# enough to make a rank-deficient sector factorable, small enough that the data
-# residual it costs (~1e-10 on a sector, measured) stays far below the
-# Kaiser-Bessel engines' own kernel error (~3e-4).
-DEFAULT_RIDGE = 1e-10
+# Relative to trace(B) / n_lattice, so it is scale- and size-independent.
+#
+# Set from held-out prediction error on REAL storm-filled sweeps, not from
+# synthetic jitter. The two disagree by orders of magnitude and the synthetic
+# answer is the dangerous one: an evenly-jittered synthetic sweep has a
+# full-rank normal matrix (condition number ~7) and wants a ridge at the 1e-10
+# floor, while every real sweep measured wants 1e-3 or larger.
+#
+# Measured by holding out every seventh ray of a storm-filled sweep, recovering
+# the lattice from the rest, and predicting the held-out rays. Median absolute
+# error in dB, against the 12-iteration CG default on the same transforms:
+#
+#   sweep                                  null  best ridge  err@best  err@1e-10  cg(12)
+#   SPOL S-band, convective line              3        1e-1      6.70       7.80    7.80
+#   SWX C-band, widespread precipitation      0        1e-2      4.79       5.08    4.92
+#   CSAPR2 C-band, convective                 0        1e-3      8.52      10.19    8.47
+#
+# Two things this says, and the second one matters more than the first.
+#
+# The ridge choice is worth 1.2-1.6 dB, and 1e-10 is the worst value tested on
+# every sweep. So a small ridge is wrong -- but note what the driver is NOT.
+# Rank deficiency is real and geometric (operational azimuth sampling leaves
+# gaps of ~2x nominal, so the lattice asks for modes the rays cannot determine;
+# ``normal_null_dim`` counts them) yet SWX and CSAPR2 are FULL-RANK and still
+# want 1e-2 and 1e-3. What drives it is that real reflectivity is not
+# band-limited: speckle, clutter and echo edges put energy in every mode, a
+# small ridge fits that energy at the measured rays, and the interpolant between
+# them is noise. A synthetic field built from a few harmonics has nothing in
+# those modes and shows none of this, which is exactly why tuning on synthetic
+# data gave an answer eight orders of magnitude too small.
+#
+# And the honest headline: with a well-chosen ridge the direct solve is
+# COMPARABLE to CG on real data, not better -- it wins on SPOL and SWX by ~0.15
+# dB and loses on CSAPR2 by ~0.05 dB. The ~1e-10 recovery it achieves on
+# synthetic band-limited fields does not transfer, because that accuracy was
+# against a truth this operator can represent exactly and real reflectivity is
+# not such a field. The direct solve's remaining advantage on real data is
+# speed (10-30x) and the absence of an iteration count to tune, not accuracy.
+#
+# See benchmarks/bench_nufft_engines.py --real for the full curves.
+#
+# Kept as the documented fixed value for callers who want one; the solver's own
+# default is ``ridge='auto'``, which derives it from the spectrum instead,
+# because real and synthetic geometries need ridges eight orders apart.
+DEFAULT_RIDGE = 1e-2
+
+# 'auto' targets this condition number. Chosen from the held-out error curve on
+# real sweeps, which is flat from ~1e2 to ~1e3 and degrades either side: looser
+# (1e8) leaves 80 dB of overfitting on the worst-sampled sweep, tighter (1e1)
+# starts over-smoothing. At 1e2 the adaptive ridge matches the CG default's
+# predictive accuracy (4.08 dB against 4.06 dB) while remaining a direct solve.
+TARGET_CONDITION = 1e2
+
+# Floor for 'auto', so a well-conditioned geometry keeps the near-exact solve
+# that makes the direct solver worth using: this is the value at which the
+# synthetic full-rank cases recover their analytic lattice to ~1e-10.
+MIN_RIDGE = 1e-10
 
 ENGINES = ("reference", "scipy", "dense", "finufft", "ducc0", "torch")
 SOLVERS = ("cg", "direct")
@@ -330,7 +399,7 @@ def solve_cg(operator, values, n_cg=0, cg_tol=1e-10):
     return lattice, info
 
 
-def solve_direct(operator, values, ridge=DEFAULT_RIDGE, **_ignored):
+def solve_direct(operator, values, ridge="auto", **_ignored):
     """Cholesky solve of the same normal equations CG iterates towards.
 
     The normal matrix ``B = A^T W A`` is built one column at a time through the
@@ -339,21 +408,36 @@ def solve_direct(operator, values, ridge=DEFAULT_RIDGE, **_ignored):
     factorisation is cached on the operator, amortised over every field gridded
     with the same geometry.
 
-    ``ridge`` is relative to ``trace(B) / n_lattice``. It is required, not
-    optional: a sector's normal matrix is singular by construction (see the module
-    docstring) and a bare Cholesky fails on it.
+    Regularisation is **not** optional here, and its size matters more than the
+    engine choice. ``ridge='auto'`` (the default) reads the actual eigenvalue
+    spectrum and picks the smallest ridge that caps the condition number at
+    :data:`TARGET_CONDITION`; pass a float to fix it, relative to
+    ``trace(B) / n_lattice``.
 
-    Note that this solver is only as accurate as the engine it inverts. On a
-    Kaiser-Bessel engine it converges to that engine's kernel error (~3e-4); pair
-    it with ``dense``, ``finufft`` or ``ducc0`` to get the ~1e-10 the module
-    docstring tabulates.
+    Why adaptive rather than a constant: real sweeps and evenly-jittered
+    synthetic ones need ridges eight orders of magnitude apart, so no single
+    number serves both. Operational azimuth sampling leaves gaps of ~2x the
+    nominal spacing, which makes the normal matrix genuinely rank-deficient
+    (measured: 23 null directions of 993 on an X-band sweep), and a small ridge
+    then fits the training rays to 1e-7 dB while predicting held-out rays 805 dB
+    away. A synthetic sweep with even jitter is full-rank and wants the small
+    ridge. ``'auto'`` recovers both: 1e-10 on the synthetic case, ~1.6e-2 on the
+    X-band sweep.
+
+    Note that this solver is only as accurate as the engine it inverts, and that
+    the ridge caps it too. On a Kaiser-Bessel engine it converges to that
+    engine's kernel error (~3e-4); the ~1e-10 the module docstring tabulates
+    needs both an exact engine *and* a well-sampled geometry that admits a small
+    ridge.
 
     Returns
     -------
     lattice : numpy.ndarray
     info : dict
-        Includes ``normal_cond``, the condition number of the regularised matrix,
-        which is the diagnostic to read when a sector's answer looks wrong.
+        ``normal_cond`` is the condition number after regularisation and
+        ``normal_null_dim`` the number of eigenvalues below ``1e-10`` of the
+        largest *before* it --- read that one to see whether the geometry, rather
+        than the solver, is what limited the answer.
     """
     values = np.asarray(values, dtype=np.float64)
     rays = values[operator.order]
@@ -361,22 +445,32 @@ def solve_direct(operator, values, ridge=DEFAULT_RIDGE, **_ignored):
     was_flat = right_hand_side.ndim == 1
     rhs_2d = right_hand_side[:, None] if was_flat else right_hand_side
 
-    factor, condition = _normal_cholesky(operator, float(ridge))
+    factor, condition, resolved, null_dim = _normal_cholesky(operator, ridge)
     lattice = sla.cho_solve(factor, rhs_2d)
     info = {
         "solver": "direct",
         "n_cg": 0,
-        "ridge_rel": float(ridge),
+        "ridge_rel": resolved,
+        "ridge_mode": "auto" if isinstance(ridge, str) else "fixed",
         "normal_cond": condition,
+        "normal_null_dim": null_dim,
     }
     return (lattice.ravel() if was_flat else lattice), info
 
 
 def _normal_cholesky(operator, ridge):
-    """Factorise ``A^T W A + ridge * scale * I``, caching on the operator."""
+    """Factorise ``A^T W A + ridge * scale * I``, caching on the operator.
+
+    ``ridge`` may be the string ``'auto'``, in which case it is derived from the
+    eigenvalue spectrum: the smallest value that brings the condition number
+    down to :data:`TARGET_CONDITION`, floored at :data:`MIN_RIDGE` so a
+    well-conditioned geometry is left essentially alone. Returns the factor, the
+    post-regularisation condition number, the ridge actually used, and the
+    pre-regularisation null-space dimension.
+    """
     cached = getattr(operator, "_normal_cache", None)
     if cached is not None and cached[0] == ridge:
-        return cached[1], cached[2]
+        return cached[1], cached[2], cached[3], cached[4]
 
     n_lattice = operator.n_lattice
     normal = operator.adjoint(operator.forward(np.eye(n_lattice)))
@@ -389,11 +483,33 @@ def _normal_cholesky(operator, ridge):
     # below *does* read the whole array.
     normal = 0.5 * (normal + normal.T)
     scale = float(np.trace(normal)) / n_lattice
-    regularised = normal + ridge * scale * np.eye(n_lattice)
+
+    # One eigendecomposition serves both the ridge choice and the rank
+    # diagnostic; it costs the same order as the Cholesky that follows.
+    eigenvalues = np.linalg.eigvalsh(normal)
+    largest = float(eigenvalues[-1])
+    null_dim = int(np.sum(eigenvalues < 1e-10 * largest))
+
+    if isinstance(ridge, str):
+        if ridge != "auto":
+            raise ValueError(f"ridge must be a float or 'auto', got {ridge!r}")
+        # Smallest ridge bringing cond(B + r*scale*I) down to TARGET_CONDITION.
+        # Solved directly from the extreme eigenvalues rather than by search.
+        smallest = max(float(eigenvalues[0]), 0.0)
+        needed = (
+            (largest - TARGET_CONDITION * smallest)
+            / (TARGET_CONDITION - 1.0)
+            / max(scale, 1e-300)
+        )
+        resolved = float(max(needed, MIN_RIDGE))
+    else:
+        resolved = float(ridge)
+
+    regularised = normal + resolved * scale * np.eye(n_lattice)
     factor = sla.cho_factor(regularised, lower=True)
     condition = float(np.linalg.cond(regularised))
-    operator._normal_cache = (ridge, factor, condition)
-    return factor, condition
+    operator._normal_cache = (ridge, factor, condition, resolved, null_dim)
+    return factor, condition, resolved, null_dim
 
 
 _SOLVERS = {"cg": solve_cg, "direct": solve_direct}
@@ -516,8 +632,10 @@ class _EngineBase:
         n_cg, cg_tol : int, float
             Passed to the ``cg`` solver; ignored by ``direct``.
         solver : {'cg', 'direct'}
-        ridge : float, optional
-            ``direct`` only; defaults to :data:`DEFAULT_RIDGE`.
+        ridge : float or {'auto'}, optional
+            ``direct`` only. Defaults to ``'auto'``, deriving the ridge from the
+            eigenvalue spectrum -- see :func:`solve_direct` for why a constant is
+            not safe here.
 
         Returns
         -------
@@ -528,7 +646,7 @@ class _EngineBase:
             raise ValueError(f"solver must be one of {SOLVERS}, got {solver!r}")
         if solver == "direct":
             lattice, info = solve_direct(
-                self, values, ridge=DEFAULT_RIDGE if ridge is None else ridge
+                self, values, ridge="auto" if ridge is None else ridge
             )
         else:
             lattice, info = solve_cg(self, values, n_cg=n_cg, cg_tol=cg_tol)
@@ -581,7 +699,7 @@ class _ReferenceEngine(_AzimuthNufftOperator):
             info["solver"] = "cg"
         elif solver == "direct":
             lattice, info = solve_direct(
-                self, values, ridge=DEFAULT_RIDGE if ridge is None else ridge
+                self, values, ridge="auto" if ridge is None else ridge
             )
         else:
             raise ValueError(f"solver must be one of {SOLVERS}, got {solver!r}")

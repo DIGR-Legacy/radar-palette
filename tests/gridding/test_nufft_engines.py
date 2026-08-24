@@ -108,7 +108,20 @@ def exact_lattice_case(nrays=120, ngates=8, jitter=0.3, seed=3, modes=(0, 1, 3, 
 
     geometry = census_sweep(make_radar(azimuths, ngates=ngates), 0)
     lattice_azimuths = np.arange(nrays) * 360.0 / nrays
-    return geometry, azimuths, evaluate(azimuths), evaluate(lattice_azimuths)
+    case = (geometry, azimuths, evaluate(azimuths), evaluate(lattice_azimuths))
+    # ``evaluate`` is attached so a caller can obtain truth at azimuths that were
+    # never measured -- needed by the held-out prediction tests, which is the only
+    # way to tell fitting from overfitting.
+    return _ExactCase(*case, evaluate=evaluate)
+
+
+class _ExactCase(tuple):
+    """The 4-tuple callers unpack, plus the field evaluator as an attribute."""
+
+    def __new__(cls, geometry, azimuths, values, lattice, evaluate):
+        self = super().__new__(cls, (geometry, azimuths, values, lattice))
+        self.evaluate = evaluate
+        return self
 
 
 def exact_forward(operator, lattice_values):
@@ -474,7 +487,9 @@ class TestDirectSolver:
             values, solver="direct"
         )
         assert info["normal_cond"] > 1.0
-        assert info["ridge_rel"] == engines.DEFAULT_RIDGE
+        # 'auto' on a well-conditioned synthetic geometry resolves to the floor.
+        assert info["ridge_rel"] == pytest.approx(engines.MIN_RIDGE)
+        assert info["ridge_mode"] == "auto"
 
     def test_the_factorisation_is_cached_across_fields(self, jittered):
         """One geometry, many fields: the factorisation must be paid for once."""
@@ -531,24 +546,32 @@ class TestSectorConditioning:
             values, solver="direct"
         )
         assert np.all(np.isfinite(lattice))
-        assert info["normal_cond"] > 1e6
+        # 'auto' caps the conditioning rather than letting it run to the 1e6+ a
+        # near-zero ridge would leave on a rank-deficient sector.
+        assert info["normal_cond"] < 10.0 * engines.TARGET_CONDITION
+        assert info["normal_null_dim"] > 0
 
     def test_it_fits_the_measured_rays_better_than_the_iterative_default(self, sector):
         """The right yardstick when the lattice is not unique.
 
         With more unknowns than measurements there is no single correct lattice,
         so accuracy is judged by how well the recovered lattice reproduces the
-        rays that *were* measured. The direct solve fits them to 8.9e-11; twelve
-        CG iterations reach 3.7e-4. Unlike the full-circle case this gain needs no
-        high-accuracy engine, because the deficiency being repaired is the rank of
-        the system rather than the fidelity of the kernel.
+        rays that *were* measured.
+
+        Note that data fit is the yardstick here only because this test's field
+        IS band-limited. On real reflectivity, fitting the measured rays more
+        closely is the *failure* mode -- an unregularised solve drives the
+        residual to 1e-7 dB and predicts unmeasured azimuths hundreds of dB away.
+        So this asserts a fit improvement at a fixed small ridge, and the
+        prediction tests in TestTheRidgeMustAdaptToTheGeometry carry the claim
+        that matters for real data.
         """
         geometry, azimuths, values = sector
         operator = engines.make_operator(azimuths, geometry)
         measured = values[operator.order]
         scale = np.ptp(values)
         iterative, _ = operator.solve(values, n_cg=12, solver="cg")
-        direct, _ = operator.solve(values, solver="direct")
+        direct, _ = operator.solve(values, solver="direct", ridge=1e-10)
         iterative_residual = np.max(np.abs(operator.forward(iterative) - measured))
         direct_residual = np.max(np.abs(operator.forward(direct) - measured))
         assert direct_residual / scale < 1e-6
@@ -658,3 +681,127 @@ class TestEvaluatorWiring:
         values = band_limited_field(azimuths, 20)
         with pytest.raises(ValueError, match="az_solver"):
             SweepSpectralEvaluator(values, geometry, azimuths, az_solver="lstsq")
+
+
+class TestTheRidgeMustAdaptToTheGeometry:
+    """The regularisation size is geometry-dependent, and getting it wrong is fatal.
+
+    These tests exist because a constant ridge tuned on synthetic sweeps was
+    catastrophically wrong on real ones. An evenly-jittered synthetic sweep has a
+    full-rank normal matrix and wants ~1e-10; a real sweep is commonly
+    rank-deficient -- operational azimuth sampling leaves gaps of about twice the
+    nominal spacing, so the lattice asks for modes the data cannot determine --
+    and at 1e-10 the solve fits its training rays to 1e-7 dB while predicting
+    held-out rays hundreds of dB away. Eight orders of magnitude apart, so
+    ``'auto'`` derives it from the spectrum instead.
+    """
+
+    def test_a_well_sampled_sweep_keeps_the_near_exact_solve(self):
+        """'auto' must not over-regularise the case the direct solver is for.
+
+        If ``auto`` simply picked a large ridge it would be safe and useless:
+        the whole value of the direct solve on an exact engine is the ~1e-10
+        recovery, and that survives only if a full-rank geometry gets the floor.
+        """
+        geometry, azimuths, values, truth = exact_lattice_case()
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        lattice, info = operator.solve(values, solver="direct")
+        assert info["normal_null_dim"] == 0
+        assert info["ridge_rel"] == pytest.approx(engines.MIN_RIDGE)
+        assert np.max(np.abs(lattice - truth)) < 1e-8 * np.ptp(truth)
+
+    def test_a_gapped_sweep_is_rank_deficient(self):
+        """Real azimuth sampling costs rank, and the report must say so.
+
+        A gap of about twice the nominal spacing -- which operational sampling
+        routinely leaves -- makes the lattice ask for modes the rays cannot
+        determine. Measured on real sweeps: 3 undetermined modes of 414 on an
+        S-band sweep, 23 of 993 on an X-band one.
+
+        Note this is a diagnostic, NOT what sets the ridge: two of the three real
+        sweeps measured are full-rank and still need a ridge of 1e-2 or larger.
+        The next test covers the effect that does set it.
+        """
+        azimuths = uniform_azimuths(360)
+        gapped = np.delete(azimuths, np.arange(0, 360, 8))
+        geometry = census_sweep(make_radar(gapped, ngates=12), 0)
+        values = band_limited_field(gapped, 12)
+        operator = engines.make_operator(gapped, geometry, engine="dense")
+        _, info = operator.solve(values, solver="direct")
+        assert info["normal_null_dim"] > 0
+
+    @pytest.mark.parametrize(
+        ("noise_sigma", "expect_large_ridge"),
+        [(0.0, False), (0.1, True), (0.5, True)],
+    )
+    def test_out_of_band_content_is_what_demands_a_large_ridge(
+        self, noise_sigma, expect_large_ridge
+    ):
+        """The finding that reversed the default, isolated to one variable.
+
+        A field built from a few harmonics has zero energy in the modes the
+        sampling cannot determine, so there is nothing to overfit and the
+        smallest ridge wins -- which is what synthetic tuning showed, and why it
+        gave an answer eight orders of magnitude too small. Real reflectivity is
+        not band-limited: speckle, clutter and echo edges put energy in every
+        mode, a small ridge fits that energy at the measured rays, and the
+        interpolant between them is noise.
+
+        Adding broadband noise to the synthetic field flips the optimum, which
+        establishes that band-limitedness -- not rank, not conditioning -- is the
+        variable that matters. Rank deficiency is neither necessary nor
+        sufficient here: this geometry is full-rank throughout.
+        """
+        case = exact_lattice_case(ngates=6)
+        geometry, azimuths, values, _ = case
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        held_out = np.arange(0.7, 360.0, 2.9)
+        truth = case.evaluate(held_out)
+        noisy = values + np.random.default_rng(7).normal(0.0, noise_sigma, values.shape)
+
+        modes = np.arange(operator.n_modes) + operator.mode_low
+        basis = np.exp(1j * np.outer(np.deg2rad(held_out), modes))
+
+        def prediction_error(ridge):
+            operator._normal_cache = None
+            lattice, _ = operator.solve(noisy, solver="direct", ridge=ridge)
+            spectrum = operator._pad @ (
+                np.fft.fft(lattice, axis=0) / operator.n_lattice
+            )
+            return float(np.median(np.abs(np.real(basis @ spectrum) - truth)))
+
+        candidates = (1e-10, 1e-6, 1e-3, 1e-2, 1e-1)
+        errors = {ridge: prediction_error(ridge) for ridge in candidates}
+        best = min(errors, key=errors.get)
+        if expect_large_ridge:
+            # The optimum moves further from the floor as out-of-band energy
+            # grows, so assert only that it has LEFT the floor -- pinning which
+            # decade wins would be pinning the noise level, not the effect.
+            assert best >= 1e-3
+            assert errors[best] < errors[1e-10]
+        else:
+            assert best == min(candidates)
+
+    def test_an_invalid_ridge_string_is_rejected(self):
+        """Only 'auto' is a valid non-numeric ridge."""
+        geometry, azimuths, values, _ = exact_lattice_case()
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        with pytest.raises(ValueError, match="auto"):
+            operator.solve(values, solver="direct", ridge="adaptive")
+
+    def test_the_report_exposes_the_rank_diagnostic(self):
+        """``normal_null_dim`` must reach the caller, not just the solver.
+
+        A caller cannot tell an under-determined answer from a converged one by
+        looking at the values, so the geometry's rank has to be in the report.
+        """
+        azimuths = uniform_azimuths(360)
+        gapped = np.delete(azimuths, np.arange(0, 360, 8))
+        geometry = census_sweep(make_radar(gapped, ngates=12), 0)
+        values = band_limited_field(gapped, 12)
+        evaluator = SweepSpectralEvaluator(
+            values, geometry, gapped, az_engine="dense", az_solver="direct"
+        )
+        evaluator.evaluate(np.array([10.0]), np.array([RANGE_FIRST_M]))
+        assert evaluator.report.extras["normal_null_dim"] > 0
+        assert evaluator.report.extras["ridge_mode"] == "auto"

@@ -29,7 +29,7 @@ git tags via `setuptools-scm`.
     matrix. That is affordable here, and only here, because on the azimuth axis
     the matrix is `n_rays x n_modes` and both are ray counts (8 MB at 720 rays).
     It is therefore exact to round-off, needs no dependency, and is the fastest
-    engine measured on 360-720 ray sweeps (35-44x with the direct solver). Which
+    engine measured on 360-720 ray sweeps (32-44x with the direct solver). Which
     engine leads is *not* monotone in ray count: `finufft` is faster at both ends
     of the tested range — at 1440 rays for the `O(n log n)` versus `O(n^2)`
     reason, and at 120 rays because the problem is too small for the dense
@@ -46,13 +46,39 @@ git tags via `setuptools-scm`.
     to that engine's own ~3e-4 kernel error and gains nothing at low jitter. A
     test asserts each half of that, because a reader who took the headline figure
     for a property of `solver='direct'` alone would be wrong.
+  - **That accuracy gain does not transfer to real reflectivity, and the module
+    now says so in a warning.** Validated by held-out ray prediction on three
+    storm-filled sweeps (SPOL S-band convective line, SWX C-band widespread
+    precipitation, CSAPR2 C-band convective): with a well-chosen ridge the direct
+    solve is *comparable* to 12 CG iterations — 6.70 dB against 7.80, 4.79
+    against 4.92, 8.52 against 8.47 — not orders better. The synthetic figure was
+    a statement about representing a field this operator can represent exactly;
+    real reflectivity is not such a field. On real data the reasons to choose the
+    direct solver are speed and having no iteration count to tune.
   - What `direct` improves on *every* engine is degraded sampling, where what
     fails is the conditioning rather than the kernel: at ±0.45-spacing jitter,
     12 iterations reach 1.7e-2 against 4.5e-4 for the direct solve on the same
     transforms. Its `ridge` is likewise not cosmetic — a sector's normal matrix is
     singular by construction (a 30-120° sector at 1° spacing fits 91 rays onto a
-    366-point lattice) and a bare Cholesky fails on it. Regularised, the direct
-    solve fits the measured rays to 8.9e-11 where 12 iterations reach 3.7e-4.
+    366-point lattice) and a bare Cholesky fails on it.
+  - **`ridge` defaults to `'auto'`, derived from the eigenvalue spectrum**, because
+    no constant serves both regimes: a synthetic band-limited sweep wants the
+    1e-10 floor and every real sweep measured wants 1e-3 or larger, and 1e-10 is
+    the *worst* value tested on all three real sweeps. Note the driver is not rank
+    deficiency — two of the three are full-rank and still want a large ridge — but
+    that real reflectivity is not band-limited: speckle, clutter and echo edges
+    put energy in modes the sweep cannot determine, a small ridge fits that energy
+    at the measured rays, and the interpolant between them is noise. A
+    parametrised test adds broadband noise to a synthetic field and shows the
+    optimum leave the floor, isolating band-limitedness as the variable.
+  - The report gains `normal_null_dim`, the number of undetermined modes in the
+    geometry, since a caller cannot tell an under-determined answer from a
+    converged one by looking at the values. Real sweeps are commonly
+    rank-deficient: operational azimuth sampling leaves gaps of ~2× the nominal
+    spacing (measured: 3 undetermined modes of 414 on SPOL, 23 of 993 on a GUC
+    X-band sweep).
+  - `benchmarks/bench_nufft_engines.py --real` reproduces the held-out ray
+    validation on real sweeps, downloading them via `open-radar-data`.
   - `benchmarks/bench_nufft_engines.py` regenerates every figure quoted above.
     Timings are hardware-dependent and the quoted ones are from an arm64 laptop.
 
