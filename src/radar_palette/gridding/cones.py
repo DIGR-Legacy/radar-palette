@@ -23,6 +23,7 @@ thing that makes a tilt a cone rather than a plane.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import warnings
@@ -269,15 +270,55 @@ TILT_BYTES_PER_CELL = 1400.0
 MEMORY_HEADROOM_FRAC = 0.5
 
 
-def resolve_tilt_workers(n_jobs, n_tilts, half_width_m, spacing_m):
-    """Decide how many tilts to grid concurrently.
+@contextlib.contextmanager
+def _limited_threads(n_threads):
+    """Cap the native BLAS/FFT thread pools for the duration of the block.
 
-    Tilts are independent, so the arithmetic is embarrassingly parallel --- but
-    memory, not cores, is what binds. One in-flight tilt holds an upsampled lattice
-    that reaches the order of a gigabyte on a wide domain at fine spacing, so a
-    core-count default would try to hold fifteen of those at once and swap. This
-    caps the pool at whatever the free memory can hold and warns rather than
-    silently over-subscribing.
+    Optional dependency by design: ``threadpoolctl`` is the only portable way to
+    change these pools after import, but requiring it would make the serial default
+    -- which needs no such cap -- depend on a package it never uses. Without it the
+    parallel path still produces correct output, just over-subscribed, so this warns
+    loudly rather than failing: a silent fallback here looks exactly like
+    "parallelism does not help on this machine".
+    """
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        warnings.warn(
+            "threadpoolctl is not installed, so the BLAS and FFT thread pools "
+            "cannot be capped. Gridding tilts concurrently will over-subscribe the "
+            "CPU (each worker starts its own pool sized to the whole machine) and "
+            "may run slower than n_jobs=1. Install threadpoolctl, or set "
+            "OMP_NUM_THREADS before importing numpy.",
+            ResourceWarning,
+            stacklevel=3,
+        )
+        yield
+        return
+    with threadpool_limits(limits=n_threads):
+        yield
+
+
+def resolve_tilt_workers(n_jobs, n_tilts, half_width_m, spacing_m):
+    """Decide how many tilts to grid concurrently, and how many BLAS threads each gets.
+
+    **Two resources bind here, and missing either one is worse than staying
+    serial.**
+
+    *Memory.* One in-flight tilt holds an upsampled lattice that reaches the order
+    of a gigabyte on a wide domain at fine spacing, so a core-count pool would try
+    to hold a volume's worth of those at once and swap.
+
+    *Threads.* The per-tilt work is BLAS and FFT, and those libraries spawn their
+    own pool sized to the machine. Nesting one inside the other multiplies rather
+    than divides: measured here, ``n_jobs=-1`` on a 14-core machine produced a load
+    average above 500 and had to be killed, because 14 workers each started ~14
+    BLAS threads. So the worker count and the per-worker thread count must share
+    one core budget, which is why this returns both.
+
+    A caller that uses the worker count and ignores the thread count will reproduce
+    that failure, so :func:`build_cones` applies the latter with ``threadpoolctl``
+    inside each worker.
 
     Parameters
     ----------
@@ -292,15 +333,20 @@ def resolve_tilt_workers(n_jobs, n_tilts, half_width_m, spacing_m):
 
     Returns
     -------
-    int
-        Workers to use, at least 1.
+    workers : int
+        Tilts to grid concurrently, at least 1.
+    blas_threads : int
+        Threads each worker may give its BLAS/FFT pool, at least 1. ``workers *
+        blas_threads`` never exceeds the core count.
     """
+    cores = os.cpu_count() or 1
     if n_jobs is None or n_jobs == 1:
-        return 1
+        # Serial: leave the native pools alone, which is what every release before
+        # n_jobs did and what a single-threaded caller expects.
+        return 1, cores
     if n_jobs == 0 or n_jobs < -1:
         raise ValueError(f"n_jobs must be -1, or a positive integer, got {n_jobs!r}")
 
-    cores = os.cpu_count() or 1
     requested = cores if n_jobs == -1 else int(n_jobs)
     requested = min(requested, n_tilts, cores)
 
@@ -320,7 +366,27 @@ def resolve_tilt_workers(n_jobs, n_tilts, half_width_m, spacing_m):
             ResourceWarning,
             stacklevel=3,
         )
-    return max(min(requested, affordable), 1)
+    workers = max(min(requested, affordable), 1)
+    # Split the cores between the two levels. Integer division deliberately floors:
+    # over-committing threads is what produced the load-500 failure, and a worker
+    # with one thread still makes progress.
+    #
+    # Measured on a 15-tilt volume over a 60 km domain at 1 km, 14 cores, with the
+    # dense engine and the direct solver (build_cones only, seconds):
+    #
+    #   n_jobs=1   1 worker  x 14 threads   17.47   1.00x
+    #   n_jobs=2   2 workers x  7 threads   10.70   1.63x
+    #   n_jobs=4   4 workers x  3 threads    8.44   2.07x
+    #   n_jobs=8   8 workers x  1 thread     5.65   3.09x
+    #
+    # Task parallelism beats BLAS threading here, and by enough to be worth saying:
+    # the fastest setting gives each worker a SINGLE thread. The azimuth solve is a
+    # few hundred rows, too small for a 14-thread GEMM to pay for its own
+    # synchronisation, so spreading whole tilts across cores wins over splitting
+    # each tilt's linear algebra. Speedup stays well short of linear because the
+    # tilts share memory bandwidth and the vertical interpolation afterwards is
+    # serial.
+    return workers, max(cores // workers, 1)
 
 
 def _available_bytes():
@@ -484,15 +550,25 @@ def build_cones(
         return entry
 
     indexed = list(enumerate(geometries))
-    workers = resolve_tilt_workers(n_jobs, len(indexed), half_width_m, spacing_m)
+    workers, blas_threads = resolve_tilt_workers(
+        n_jobs, len(indexed), half_width_m, spacing_m
+    )
     if workers == 1:
         results = [grid_one_tilt(item) for item in indexed]
     else:
         # Threads, not processes: the per-tilt cost is NumPy/SciPy linear algebra and
         # FFTs, which release the GIL, and a process pool would have to pickle the
         # radar object to every worker -- hundreds of megabytes for a research volume.
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(grid_one_tilt, indexed))
+        #
+        # The thread limit is not optional. Those same libraries each start a pool
+        # sized to the whole machine, so without this the two levels multiply: 14
+        # workers x 14 BLAS threads drove the load average past 500 on a 14-core
+        # machine and had to be killed. threadpoolctl is the only portable way to
+        # set this after import, since the environment variables the runtimes read
+        # are consulted when they load.
+        with _limited_threads(blas_threads):
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(grid_one_tilt, indexed))
 
     cones = [entry[0] for entry in results]
     heights = [entry[1] for entry in results]

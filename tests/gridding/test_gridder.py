@@ -20,6 +20,9 @@ can independently be wrong:
 
 from __future__ import annotations
 
+import os
+import warnings
+
 import numpy as np
 import pytest
 
@@ -644,31 +647,66 @@ class TestTiltsCanBeGriddedConcurrently:
         )
 
 
-class TestTheWorkerCountRespectsMemoryNotCores:
-    """A core-count default would swap on the domains this operator is used on."""
+class TestTheWorkerCountRespectsMemoryAndThreads:
+    """Two resources bind, and ignoring either is worse than staying serial.
 
-    def test_the_default_is_serial(self):
-        """Unchanged memory profile unless a caller opts in."""
-        assert resolve_tilt_workers(None, 15, 85_500.0, 1000.0) == 1
-        assert resolve_tilt_workers(1, 15, 85_500.0, 1000.0) == 1
+    The thread half of this exists because it was got wrong: ``n_jobs=-1`` on a
+    14-core machine drove the load average past 500 and had to be killed, since 14
+    workers each started their own ~14-thread BLAS pool. A test that only checked
+    the worker count would have passed throughout.
+    """
+
+    def test_the_default_is_serial_and_leaves_thread_pools_alone(self):
+        """Unchanged behaviour unless a caller opts in."""
+        for request in (None, 1):
+            workers, threads = resolve_tilt_workers(request, 15, 85_500.0, 1000.0)
+            assert workers == 1
+            assert threads == (os.cpu_count() or 1)
+
+    def test_workers_times_threads_never_exceeds_the_core_count(self):
+        """The property that actually prevents the failure.
+
+        Asserted across the whole plausible range rather than at one point, because
+        the bug was a *product* being too large --- either factor alone looked fine.
+        """
+        cores = os.cpu_count() or 1
+        for request in (2, 3, 4, 8, 16, -1):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                workers, threads = resolve_tilt_workers(request, 15, 20_000.0, 2000.0)
+            assert workers >= 1
+            assert threads >= 1
+            assert workers * threads <= cores
+
+    def test_more_workers_means_fewer_threads_each(self):
+        """The budget is split, not handed out twice."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            few = resolve_tilt_workers(2, 15, 20_000.0, 2000.0)
+            many = resolve_tilt_workers(8, 15, 20_000.0, 2000.0)
+        if many[0] > few[0]:
+            assert many[1] <= few[1]
 
     def test_a_fine_lattice_caps_below_the_core_count(self):
-        """The case that motivates the function.
+        """The memory cap, which is the other resource.
 
-        A 171 km domain at 250 m is ~470k cells per tilt and the evaluator's
-        upsampled working set reaches ~1 GB, so fifteen at once would need more
-        memory than the machine has. The cap must bind, and it must warn: silently
-        running fewer workers than asked would look like the parallelism not working.
+        A 171 km domain at 100 m holds a large upsampled lattice per tilt, so
+        fifteen at once would need more memory than the machine has. The cap must
+        bind, and it must warn: silently running fewer workers than asked looks
+        identical to the parallelism not working.
         """
-        coarse = resolve_tilt_workers(-1, 15, 85_500.0, 2000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            coarse, _ = resolve_tilt_workers(-1, 15, 85_500.0, 2000.0)
         with pytest.warns(ResourceWarning, match="working memory"):
-            fine = resolve_tilt_workers(-1, 15, 85_500.0, 100.0)
+            fine, _ = resolve_tilt_workers(-1, 15, 85_500.0, 100.0)
         assert fine < coarse
         assert fine >= 1
 
     def test_it_never_asks_for_more_workers_than_tilts(self):
         """Six-tilt volumes do not benefit from sixty workers."""
-        assert resolve_tilt_workers(-1, 3, 20_000.0, 2000.0) <= 3
+        workers, _ = resolve_tilt_workers(-1, 3, 20_000.0, 2000.0)
+        assert workers <= 3
 
     def test_a_nonsense_request_is_rejected_rather_than_clamped(self):
         """``n_jobs=0`` is a mistake, not a request for serial execution."""

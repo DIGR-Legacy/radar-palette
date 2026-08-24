@@ -15,11 +15,22 @@ git tags via `setuptools-scm`.
   - **Threads, not processes.** The per-tilt cost is NumPy/SciPy linear algebra and
     FFTs, which release the GIL; a process pool would pickle the radar object to
     every worker, hundreds of megabytes for a research volume.
-  - **The cap is memory, not cores** — `resolve_tilt_workers` sizes the pool from
-    free memory and the per-tilt lattice, warns when it reduces a request, and
-    defaults to serial so the memory profile of previous releases is unchanged.
-    One in-flight tilt reaches ~1 GB on a 171 km domain at 250 m, so `n_jobs=-1`
-    resolves to 14 workers at 2 km and 8 at 250 m on the same machine.
+  - **Two resources bind, and `resolve_tilt_workers` returns both.** Memory caps
+    the worker count (one in-flight tilt reaches ~1 GB on a 171 km domain at
+    250 m, so `n_jobs=-1` resolves to 14 workers at 2 km and 8 at 250 m); the core
+    budget caps the BLAS/FFT threads each worker may use. Missing the second is
+    worse than staying serial: NumPy and SciPy each start a pool sized to the whole
+    machine, so 14 workers × ~14 threads drove the load average past 500 on a
+    14-core machine and had to be killed. `workers * blas_threads` is now bounded by
+    the core count, applied with `threadpoolctl` inside the pool.
+  - Measured on a 15-tilt volume, 60 km domain at 1 km, dense engine and direct
+    solver: **3.1x at `n_jobs=8`** (17.5 s serial → 5.7 s). Task parallelism beats
+    BLAS threading — the fastest setting gives each worker a *single* thread,
+    because the azimuth solve is a few hundred rows and too small for a wide GEMM
+    to pay for its synchronisation.
+  - `threadpoolctl` is a new optional dependency (`pip install radar-palette[parallel]`).
+    The serial default never touches the native pools, so it is not required;
+    without it the parallel path is still correct but over-subscribes, and warns.
   - Tests assert the parallel and serial grids are *bit-identical* (any difference
     would be a race, not a tolerable reordering) and that the cone stack stays in
     ascending-elevation order regardless of completion order.

@@ -66,11 +66,16 @@ advection = ["scikit-image>=0.22"]
 # implementation to round-off. Install one to trade a dependency for speed
 # (finufft, ducc0) or for GPU execution (torch).
 spectral = ["finufft>=2.2"]
+# Thread-pool control for n_jobs>1 in radar_palette.gridding.cones. Optional
+# because the serial default never touches the native pools; without it the
+# parallel path still gives correct output but over-subscribes the CPU, so it
+# warns rather than failing.
+parallel = ["threadpoolctl>=3.0"]
 spectral-ducc = ["ducc0>=0.33"]
 spectral-torch = ["torch>=2.0", "torchkbnufft>=1.4"]
-all = ["radar-palette[advection,spectral]"]
+all = ["radar-palette[advection,spectral,parallel]"]
 # Every optional engine, for benchmarking and for the engine-equivalence tests.
-engines = ["radar-palette[spectral,spectral-ducc,spectral-torch]"]
+engines = ["radar-palette[spectral,spectral-ducc,spectral-torch,parallel]"]
 test = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
