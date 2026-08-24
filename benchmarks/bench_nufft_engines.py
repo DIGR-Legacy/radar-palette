@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 
@@ -231,14 +232,14 @@ def main(argv=None):
         rows = real_data()
         print(
             f"{'case':52s} {'solver':8s} {'ridge':>9} "
-            f"{'null':>5} {'median':>8} {'p95':>8}"
+            f"{'null':>5} {'all':>8} {'>echo':>8}"
         )
         for row in rows:
             ridge = "--" if np.isnan(row["ridge"]) else f"{row['ridge']:.1e}"
             null = "--" if np.isnan(row["null_dim"]) else f"{int(row['null_dim'])}"
             print(
                 f"{row['case']:52s} {row['solver']:8s} {ridge:>9} {null:>5} "
-                f"{row['median_dB']:>8.3f} {row['p95_dB']:>8.2f}"
+                f"{row['median_dB']:>8.3f} {row['echo_median_dB']:>8.3f}"
             )
         if arguments.csv:
             with open(arguments.csv, "w", newline="") as handle:
@@ -297,6 +298,20 @@ def main(argv=None):
 # PPI: a clear-air or weak-stratiform sweep measures how well the operator
 # reproduces noise, which is not a number to tune a default against. Fractions
 # are of valid gates above 10 / 30 dBZ.
+# A local volume, if the caller points at one with RADAR_PALETTE_BNF_VOLUME.
+# The figures in nufft_engines.py come from the ARM BNF C-SAPR2 case used by the
+# performance notebook, which is not downloadable; a full multi-tilt volume is
+# more informative than the single sweeps above, because the tilts share a scan
+# strategy and differ only in what they are looking at.
+BNF_VOLUME = os.environ.get("RADAR_PALETTE_BNF_VOLUME")
+BNF_SWEEPS = (0, 3, 7, 11, 14)
+
+# Echo threshold for the stratified figures. Over half the gates in a real sweep
+# sit below 0 dBZ, so an unstratified median is dominated by noise and by the
+# fill floor, and it ranks the solvers differently from the echo it is supposed
+# to be measuring.
+ECHO_THRESHOLD_DBZ = 10.0
+
 REAL_CASES = (
     (
         "cfrad.20080604_002217_000_SPOL_v36_SUR.nc",
@@ -355,22 +370,34 @@ def _holdout(radar, sweep, field, stride=HOLDOUT_STRIDE):
     return azimuths[keep], training, azimuths[~keep], held_out
 
 
-def _predict(operator, lattice, azimuths_deg):
-    """Evaluate the recovered band-limited interpolant at unmeasured azimuths."""
-    modes = np.arange(operator.n_modes) + operator.mode_low
-    spectrum = operator._pad @ (np.fft.fft(lattice, axis=0) / operator.n_lattice)
-    basis = np.exp(1j * np.outer(np.deg2rad(azimuths_deg), modes))
-    return np.real(basis @ spectrum)
-
-
-def real_data(engine="dense"):
-    """Held-out prediction error on real reflectivity, per ridge and for CG."""
-    import pyart
+def _real_sources():
+    """List downloadable sweeps, plus a local volume if one is configured."""
     from open_radar_data import DATASETS
 
+    sources = [
+        (DATASETS.fetch(filename), sweep, field, label)
+        for filename, sweep, field, label in REAL_CASES
+    ]
+    if BNF_VOLUME and os.path.isfile(BNF_VOLUME):
+        for sweep in BNF_SWEEPS:
+            sources.append(
+                (BNF_VOLUME, sweep, "reflectivity", f"BNF C-SAPR2 sweep {sweep}")
+            )
+    return sources
+
+
+def real_data(engine="dense", echo_threshold=ECHO_THRESHOLD_DBZ):
+    """Held-out prediction error on real reflectivity, per ridge and for CG.
+
+    Reported on gates above ``echo_threshold`` as well as on all gates, because
+    the two rank the solvers differently: over half the gates in a real sweep are
+    below 0 dBZ, so an unstratified median mostly measures noise.
+    """
+    import pyart
+
     rows = []
-    for filename, sweep, field, label in REAL_CASES:
-        radar = pyart.io.read(DATASETS.fetch(filename))
+    for path, sweep, field, label in _real_sources():
+        radar = pyart.io.read(path)
         split = _holdout(radar, sweep, field)
         if split is None:
             continue
@@ -381,19 +408,24 @@ def real_data(engine="dense"):
         )
         operator = engines.make_operator(train_az, geometry, engine=engine)
 
+        echo = finite & (test_values > echo_threshold)
+
         def error(
             lattice,
-            operator=operator,
             test_az=test_az,
             test_values=test_values,
             finite=finite,
+            echo=echo,
         ):
-            predicted = _predict(operator, lattice, test_az)
-            deviation = np.abs(predicted[finite] - test_values[finite])
-            return float(np.median(deviation)), float(np.percentile(deviation, 95))
+            predicted = engines.evaluate_lattice(lattice, test_az)
+            deviation = np.abs(predicted - test_values)
+            return (
+                float(np.median(deviation[finite])),
+                float(np.median(deviation[echo])) if echo.sum() > 50 else np.nan,
+            )
 
         lattice, info = operator.solve(train_values, n_cg=12, solver="cg")
-        median, p95 = error(lattice)
+        median, echo_median = error(lattice)
         rows.append(
             {
                 "case": label,
@@ -401,14 +433,14 @@ def real_data(engine="dense"):
                 "ridge": np.nan,
                 "null_dim": np.nan,
                 "median_dB": median,
-                "p95_dB": p95,
+                "echo_median_dB": echo_median,
             }
         )
 
         for ridge in REAL_RIDGES + ("auto",):
             operator._normal_cache = None
             lattice, info = operator.solve(train_values, solver="direct", ridge=ridge)
-            median, p95 = error(lattice)
+            median, echo_median = error(lattice)
             rows.append(
                 {
                     "case": label,
@@ -416,7 +448,7 @@ def real_data(engine="dense"):
                     "ridge": info["ridge_rel"],
                     "null_dim": info["normal_null_dim"],
                     "median_dB": median,
-                    "p95_dB": p95,
+                    "echo_median_dB": echo_median,
                 }
             )
     return rows

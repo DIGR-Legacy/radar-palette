@@ -49,12 +49,44 @@ git tags via `setuptools-scm`.
   - **That accuracy gain does not transfer to real reflectivity, and the module
     now says so in a warning.** Validated by held-out ray prediction on three
     storm-filled sweeps (SPOL S-band convective line, SWX C-band widespread
-    precipitation, CSAPR2 C-band convective): with a well-chosen ridge the direct
-    solve is *comparable* to 12 CG iterations — 6.70 dB against 7.80, 4.79
-    against 4.92, 8.52 against 8.47 — not orders better. The synthetic figure was
-    a statement about representing a field this operator can represent exactly;
+    precipitation, CSAPR2 C-band convective): at its best ridge the direct solve
+    is *comparable* to 12 CG iterations — 6.70 dB against 7.80, 4.74 against
+    4.92, 8.52 against 8.47 — not orders better. The synthetic figure was a
+    statement about representing a field this operator can represent exactly;
     real reflectivity is not such a field. On real data the reasons to choose the
     direct solver are speed and having no iteration count to tune.
+  - **`ridge='auto'` is an improvement on the old default, not the per-sweep
+    optimum, and on a well-conditioned sweep it does nothing at all.** Validated
+    further on a 15-tilt ARM BNF C-SAPR2 volume: at 4.5-42° the normal matrix is
+    well behaved (condition number 15-32) so the condition-number term never
+    binds and `auto` returns the floor — yet the held-out optimum on echo gates
+    is 1e-3..1e-2 at *every* tilt. Conditioning is a correlate of the quantity
+    that matters (out-of-band energy), not that quantity, and on a clean geometry
+    the correlation fails in the unsafe direction. Two fixes were tried and both
+    reverted, with the reasoning recorded at `MIN_RIDGE`: raising the floor to
+    1e-2 wins 0.12 dB on real data but gives up eight orders of magnitude on a
+    band-limited field, and generalised cross-validation recovers the synthetic
+    case exactly then fails on real sweeps because it scores on training residual
+    — which is what overfitting minimises. **For real reflectivity pass
+    `ridge=1e-2` explicitly** (that is what `DEFAULT_RIDGE` is); `--real`
+    measures it for a given radar.
+  - **Stratify by echo before reading any dB figure.** Over half the gates in a
+    real sweep sit below 0 dBZ, so an unstratified median is dominated by noise
+    and by the gap-fill floor — and it ranks the solvers differently. On BNF
+    sweep 11 a ridge of 1e-1 scores best on all gates (4.14 dB) and worst on
+    gates above 10 dBZ (8.09 dB). `--real` now reports both columns.
+  - Across eight real sweeps (three single-sweep files plus five BNF tilts),
+    graded on echo gates with a per-sweep oracle ridge, the direct solve beats
+    12 CG iterations on 6 of 8 by a mean of 0.13 dB — a wash, consistent with the
+    single-sweep result and not the orders-of-magnitude the synthetic figures
+    suggest.
+  - `evaluate_lattice(lattice_values, azimuths_deg)` evaluates the recovered
+    interpolant at arbitrary azimuths. Needed because `forward` only evaluates at
+    the *measured* rays, which cannot distinguish fitting from overfitting; it is
+    a module function rather than an engine method because the interpolant
+    belongs to the lattice, not to whichever engine recovered it. The `reference`
+    engine also gains the `mode_low` attribute every other engine already had —
+    without it that engine alone failed on this path.
   - What `direct` improves on *every* engine is degraded sampling, where what
     fails is the conditioning rather than the kernel: at ±0.45-spacing jitter,
     12 iterations reach 1.7e-2 against 4.5e-4 for the direct solve on the same

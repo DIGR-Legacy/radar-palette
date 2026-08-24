@@ -143,13 +143,15 @@ with no change of engine, and 4.3e7 with ``dense``.
    statement about which operator best represents a field this operator can
    represent exactly. Real reflectivity is not such a field: speckle, clutter
    and echo edges put energy in modes the sweep cannot determine. Measured by
-   held-out ray prediction on three storm-filled sweeps, the direct solve is
-   *comparable* to 12 CG iterations --- 6.70 dB against 7.80 (SPOL), 4.79
-   against 4.92 (SWX), 8.52 against 8.47 (CSAPR2) --- not orders better. On real
-   data the reasons to choose it are speed (10-30x) and having no iteration
-   count to tune. The ridge, not the solver, is what matters for accuracy there;
-   see :data:`DEFAULT_RIDGE`. Run ``benchmarks/bench_nufft_engines.py --real``
-   before quoting any accuracy figure from this module to a user.
+   held-out ray prediction on three storm-filled sweeps, the direct solve at its
+   best ridge is *comparable* to 12 CG iterations --- 6.70 dB against 7.80
+   (SPOL), 4.74 against 4.92 (SWX), 8.52 against 8.47 (CSAPR2) --- not orders
+   better, and ``ridge='auto'`` does not always find that best ridge. On real
+   data the reasons to choose this solver are speed (10-30x) and having no
+   iteration count to tune. The ridge, not the solver, is what matters for
+   accuracy there; see :data:`DEFAULT_RIDGE` for the per-sweep numbers. Run
+   ``benchmarks/bench_nufft_engines.py --real`` before quoting any accuracy
+   figure from this module to a user.
 
 The ridge term is load-bearing, not cosmetic
 --------------------------------------------
@@ -229,34 +231,45 @@ DEFAULT_SOLVER = "cg"
 #
 # Measured by holding out every seventh ray of a storm-filled sweep, recovering
 # the lattice from the rest, and predicting the held-out rays. Median absolute
-# error in dB, against the 12-iteration CG default on the same transforms:
+# error in dB; ``cg(12)`` is the iterative default on the same transforms, and
+# ``grid-best`` is the best of a fixed 1e-10..1e0 decade sweep:
 #
-#   sweep                                  null  best ridge  err@best  err@1e-10  cg(12)
-#   SPOL S-band, convective line              3        1e-1      6.70       7.80    7.80
-#   SWX C-band, widespread precipitation      0        1e-2      4.79       5.08    4.92
-#   CSAPR2 C-band, convective                 0        1e-3      8.52      10.19    8.47
+#   sweep                                null  cg(12)  r=1e-10  grid-best   'auto'
+#   SPOL S-band, convective line            3    7.80     7.80  6.70@1e-1  7.45@1.5e-2
+#   SWX C-band, widespread precipitation    0    4.92     5.08  4.74@1.8e-2 4.74@1.8e-2
+#   CSAPR2 C-band, convective               0    8.47    10.19  8.52@1e-3  9.89@1.3e-2
 #
-# Two things this says, and the second one matters more than the first.
+# Three readings, in order of how much they should change what you do.
 #
-# The ridge choice is worth 1.2-1.6 dB, and 1e-10 is the worst value tested on
-# every sweep. So a small ridge is wrong -- but note what the driver is NOT.
-# Rank deficiency is real and geometric (operational azimuth sampling leaves
-# gaps of ~2x nominal, so the lattice asks for modes the rays cannot determine;
-# ``normal_null_dim`` counts them) yet SWX and CSAPR2 are FULL-RANK and still
-# want 1e-2 and 1e-3. What drives it is that real reflectivity is not
-# band-limited: speckle, clutter and echo edges put energy in every mode, a
-# small ridge fits that energy at the measured rays, and the interpolant between
-# them is noise. A synthetic field built from a few harmonics has nothing in
-# those modes and shows none of this, which is exactly why tuning on synthetic
-# data gave an answer eight orders of magnitude too small.
+# 1e-10 is the worst ridge tested on every sweep, so a near-zero ridge is simply
+# wrong. But the driver is NOT rank deficiency, which was the obvious hypothesis
+# and is not what the data says: SWX and CSAPR2 are FULL-RANK and still want
+# ~1e-2 and 1e-3. (Rank deficiency is real and geometric --- operational azimuth
+# sampling leaves gaps of ~2x nominal, so the lattice asks for modes the rays
+# cannot determine, and ``normal_null_dim`` counts them --- it just is not what
+# sets the ridge.) What sets it is that real reflectivity is not band-limited:
+# speckle, clutter and echo edges put energy in every mode, a small ridge fits
+# that energy at the measured rays, and the interpolant between them is noise. A
+# synthetic field built from a few harmonics has nothing in those modes and shows
+# none of this, which is why tuning on synthetic data gave an answer eight orders
+# of magnitude too small.
 #
-# And the honest headline: with a well-chosen ridge the direct solve is
-# COMPARABLE to CG on real data, not orders better -- it wins on SPOL by 1.10 dB
-# and on SWX by 0.13 dB, and loses on CSAPR2 by 0.05 dB. The ~1e-10 recovery on
-# synthetic band-limited fields does not transfer, because that accuracy was
-# against a truth this operator can represent exactly and real reflectivity is
-# not such a field. The direct solve's remaining advantage on real data is
-# speed (10-30x) and the absence of an iteration count to tune, not accuracy.
+# ``'auto'`` is a large improvement on the old default and NOT the per-sweep
+# optimum. It matches grid-best on SWX, gives up 0.75 dB on SPOL, and on CSAPR2
+# lands 1.37 dB worse than grid-best and 1.42 dB worse than CG. It targets a
+# condition number, which is a proxy for the quantity that actually matters
+# (out-of-band energy) and a decent one only because the two correlate. A sweep
+# whose optimum is far from TARGET_CONDITION is not pathological, just not what
+# this heuristic was fitted to --- three sweeps is a thin basis. Pass an explicit
+# float when a case matters, and use --real to find it.
+#
+# And the headline: with a well-chosen ridge the direct solve is COMPARABLE to CG
+# on real data, not orders better -- 1.10 dB better on SPOL, 0.18 dB better on
+# SWX, 0.05 dB worse on CSAPR2. The ~1e-10 recovery on synthetic band-limited
+# fields does not transfer, because that accuracy was against a truth this
+# operator can represent exactly and real reflectivity is not such a field. The
+# direct solve's remaining advantage on real data is speed (10-30x) and the
+# absence of an iteration count to tune, not accuracy.
 #
 # See benchmarks/bench_nufft_engines.py --real for the full curves.
 #
@@ -272,9 +285,34 @@ DEFAULT_RIDGE = 1e-2
 # predictive accuracy (4.08 dB against 4.06 dB) while remaining a direct solve.
 TARGET_CONDITION = 1e2
 
-# Floor for 'auto', so a well-conditioned geometry keeps the near-exact solve
-# that makes the direct solver worth using: this is the value at which the
-# synthetic full-rank cases recover their analytic lattice to ~1e-10.
+# Floor for 'auto'. Deliberately left at the value that preserves the near-exact
+# solve on a band-limited field, which is the only regime where this solver's
+# accuracy advantage is real and large (1.1e-10 at this floor, degrading linearly
+# with the ridge to 1.1e-2 at 1e-2).
+#
+# Raising it to 1e-2 was tried, because on the BNF C-SAPR2 volume 'auto' leaves
+# well-conditioned tilts under-regularised -- at 4.5-42 deg the normal matrix is
+# well behaved (cond 15-32) so the condition-number term never binds, yet the
+# held-out optimum on echo gates is 1e-3..1e-2 at every tilt. The floor at 1e-2
+# does win there (5.330 dB against 5.446, mean of per-tilt medians on >10 dBZ
+# gates, versus 5.272 for a per-sweep oracle and 5.389 for CG). It was reverted
+# because it buys 0.12 dB on real data by giving up eight orders of magnitude on
+# the band-limited case, which is a bad trade for a DEFAULT: it hard-codes an
+# assumption about the data into a geometry-only rule, and a caller gridding a
+# smooth or simulated field would silently get a far worse answer.
+#
+# Generalised cross-validation was also tried as a data-driven replacement. It
+# recovers 1e-10 exactly on the synthetic case and then fails on real sweeps
+# (selecting 1e-10 on four BNF tilts whose optimum is 1e-2), because it scores on
+# training residual and overfitting is precisely what minimises that. Any rule
+# fitted on the measured rays has the same defect; distinguishing signal from
+# out-of-band noise needs held-out rays, which a solver call does not have.
+#
+# So: no automatic rule tested is reliable enough to be a silent default. 'auto'
+# handles the case it can defend (a degenerate geometry, where it selects ~1.7e-2
+# on BNF sweep 0 with cond 1e9) and otherwise stays out of the way. For real
+# reflectivity, set ridge=1e-2 explicitly -- DEFAULT_RIDGE is that value, and
+# benchmarks/bench_nufft_engines.py --real measures it for a given radar.
 MIN_RIDGE = 1e-10
 
 ENGINES = ("reference", "scipy", "dense", "finufft", "ducc0", "torch")
@@ -456,6 +494,56 @@ def solve_direct(operator, values, ridge="auto", **_ignored):
         "normal_null_dim": null_dim,
     }
     return (lattice.ravel() if was_flat else lattice), info
+
+
+def evaluate_lattice(lattice_values, azimuths_deg):
+    """Evaluate the recovered band-limited interpolant at arbitrary azimuths.
+
+    The interpolant is a property of the **lattice**, not of the engine that
+    recovered it: whichever engine ran, the result is the trig polynomial whose
+    coefficients are the lattice DFT, with the Nyquist mode split so the
+    interpolant is real. So this is one function rather than a per-engine method,
+    and two engines that disagree here disagree about their output rather than
+    about their evaluation.
+
+    Needed because ``forward`` only evaluates at the *measured* azimuths, which
+    cannot distinguish fitting from overfitting. Holding rays out and predicting
+    them requires evaluating somewhere else, and on real data that distinction is
+    the whole question --- see :data:`DEFAULT_RIDGE`.
+
+    Parameters
+    ----------
+    lattice_values : array_like
+        ``(n_lattice,)`` or ``(n_lattice, n_gates)``, as returned by ``solve``.
+    azimuths_deg : array_like
+        Azimuths to evaluate at, in degrees. Need not be measured azimuths, need
+        not be sorted, and need not lie inside the measured range.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(len(azimuths_deg),)`` or ``(len(azimuths_deg), n_gates)`` to match the
+        input's dimensionality.
+    """
+    lattice = np.asarray(lattice_values, dtype=np.float64)
+    was_flat = lattice.ndim == 1
+    lattice_2d = lattice[:, None] if was_flat else lattice
+    n_lattice = lattice_2d.shape[0]
+
+    coefficients = np.fft.fft(lattice_2d, axis=0) / n_lattice
+    modes = np.fft.fftfreq(n_lattice, d=1.0 / n_lattice).astype(int)
+    phase = np.deg2rad(np.asarray(azimuths_deg, dtype=np.float64))
+
+    out = np.zeros((phase.size, lattice_2d.shape[1]), dtype=np.float64)
+    for index, mode in enumerate(modes):
+        if n_lattice % 2 == 0 and mode == -(n_lattice // 2):
+            # Nyquist: half to +N/2 and half to -N/2, which is a cosine. Assigning
+            # it wholly to one side gives a complex interpolant.
+            basis = np.cos(mode * phase)
+        else:
+            basis = np.exp(1j * mode * phase)
+        out += np.real(basis[:, None] * coefficients[index][None, :])
+    return out.ravel() if was_flat else out
 
 
 def _normal_cholesky(operator, ridge):
@@ -689,7 +777,14 @@ class _ReferenceEngine(_AzimuthNufftOperator):
 
     def __init__(self, azimuths_deg, geometry, kb_width=4.0, oversamp=2.0):
         super().__init__(azimuths_deg, geometry, kb_width=kb_width, oversamp=oversamp)
+        # This engine delegates the transforms to nufft.py, which carries its own
+        # mode bookkeeping, so the base class's padded mode map is unused here.
+        # ``n_modes``/``mode_low`` are still set --- consistently with every other
+        # engine --- because a caller evaluating the recovered interpolant at
+        # azimuths that were never measured needs them, and an engine that
+        # silently lacked them would fail only on that path.
         self.n_modes = self.n_lattice
+        self.mode_low = -(self.n_modes // 2)
         self._normal_cache = None
 
     def solve(self, values, n_cg=0, cg_tol=1e-10, solver=DEFAULT_SOLVER, ridge=None):

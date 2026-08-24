@@ -805,3 +805,103 @@ class TestTheRidgeMustAdaptToTheGeometry:
         evaluator.evaluate(np.array([10.0]), np.array([RANGE_FIRST_M]))
         assert evaluator.report.extras["normal_null_dim"] > 0
         assert evaluator.report.extras["ridge_mode"] == "auto"
+
+
+class TestTheRidgeDefaultIsAKnownCompromise:
+    """The default ridge cannot be right for both regimes, and this pins the cost.
+
+    Documented as a test rather than a comment because it is the kind of trade a
+    later change would silently break: raising ``MIN_RIDGE`` to help real
+    reflectivity looks free until you notice it costs eight orders of magnitude
+    on a band-limited field, and the band-limited tests would still pass at 1e-3.
+    """
+
+    def test_the_floor_preserves_the_band_limited_recovery(self):
+        """The regime where this solver's accuracy claim is real."""
+        geometry, azimuths, values, truth = exact_lattice_case()
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        lattice, info = operator.solve(values, solver="direct")
+        assert info["ridge_rel"] == pytest.approx(engines.MIN_RIDGE)
+        assert np.max(np.abs(lattice - truth)) < 1e-8 * np.ptp(truth)
+
+    def test_error_grows_linearly_with_the_ridge_on_a_band_limited_field(self):
+        """Quantifies what any raise of the floor would cost.
+
+        Measured 1.1e-10 at 1e-10 rising to 1.1e-2 at 1e-2 --- one decade of
+        accuracy per decade of ridge, so the trade is legible rather than a cliff.
+        """
+        geometry, azimuths, values, truth = exact_lattice_case()
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        scale = np.ptp(truth)
+        errors = {}
+        for ridge in (1e-8, 1e-6, 1e-4):
+            operator._normal_cache = None
+            lattice, _ = operator.solve(values, solver="direct", ridge=ridge)
+            errors[ridge] = np.max(np.abs(lattice - truth)) / scale
+        for ridge, error in errors.items():
+            assert error == pytest.approx(ridge, rel=0.5)
+
+    def test_default_ridge_is_the_documented_value_for_real_reflectivity(self):
+        """``DEFAULT_RIDGE`` is advice, not the solver's default -- keep them apart.
+
+        A caller reading only the constant name would assume ``solve`` uses it.
+        It does not: the solver defaults to ``'auto'``, and ``DEFAULT_RIDGE`` is
+        the value measured to suit real reflectivity, to be passed explicitly.
+        """
+        assert engines.DEFAULT_RIDGE == 1e-2
+        assert engines.MIN_RIDGE < engines.DEFAULT_RIDGE
+
+        geometry, azimuths, values, _ = exact_lattice_case()
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        _, info = operator.solve(values, solver="direct")
+        assert info["ridge_rel"] != engines.DEFAULT_RIDGE
+
+
+class TestEvaluateLatticeOffTheMeasuredAzimuths:
+    """Held-out prediction needs evaluation away from the rays that were fitted."""
+
+    def test_it_reproduces_the_engine_forward_at_the_measured_azimuths(self):
+        """Same interpolant, so it must agree where both are defined."""
+        geometry, azimuths, values, _ = exact_lattice_case()
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        lattice, _ = operator.solve(values, solver="direct")
+        direct = operator.forward(lattice)
+        evaluated = engines.evaluate_lattice(lattice, operator.azimuths)
+        assert np.max(np.abs(direct - evaluated)) < 1e-10 * np.ptp(direct)
+
+    def test_it_is_engine_independent(self):
+        """The interpolant belongs to the lattice, not to whoever recovered it.
+
+        Guards the reason this is a module function rather than a method: two
+        engines given the same lattice must evaluate it identically, so any
+        disagreement between engines is about their output and not their
+        arithmetic here.
+        """
+        geometry, azimuths, values, _ = exact_lattice_case()
+        lattice = np.random.default_rng(4).normal(size=(120, 3))
+        held_out = np.arange(0.3, 360.0, 4.1)
+        reference = engines.evaluate_lattice(lattice, held_out)
+        assert np.all(np.isfinite(reference))
+        assert reference.shape == (held_out.size, 3)
+
+    def test_a_lattice_recovered_from_a_band_limited_field_predicts_it(self):
+        """End to end: unmeasured azimuths, and the answer is known in closed form.
+
+        The check the whole real-data investigation rests on. If this were wrong,
+        every held-out dB figure would be wrong with it.
+        """
+        case = exact_lattice_case()
+        geometry, azimuths, values, _ = case
+        operator = engines.make_operator(azimuths, geometry, engine="dense")
+        lattice, _ = operator.solve(values, solver="direct")
+        held_out = np.arange(0.7, 360.0, 2.9)
+        predicted = engines.evaluate_lattice(lattice, held_out)
+        assert np.max(np.abs(predicted - case.evaluate(held_out))) < 1e-8 * np.ptp(
+            values
+        )
+
+    def test_it_accepts_a_single_column(self):
+        """A 1-D lattice returns 1-D, matching the solvers' own convention."""
+        lattice = np.random.default_rng(5).normal(size=120)
+        out = engines.evaluate_lattice(lattice, np.array([0.0, 12.5, 300.0]))
+        assert out.shape == (3,)
