@@ -29,7 +29,11 @@ from radar_palette.gridding import (  # noqa: E402
     DEFAULT_GRIDDING_METHOD,
     GRIDDING_METHODS,
     VerticalFlag,
+    build_cones,
+    census_radar,
+    dedup_sweeps,
     grid_volume,
+    resolve_tilt_workers,
 )
 
 GRID_SHAPE = (4, 41, 41)
@@ -587,3 +591,87 @@ class TestFlavourAndMethodCompose:
         np.testing.assert_allclose(
             from_radar, np.squeeze(from_tree), equal_nan=True, rtol=1e-5
         )
+
+
+class TestTiltsCanBeGriddedConcurrently:
+    """Parallelism must not change the answer, and must not swap.
+
+    Tilts are independent, so this is the one place in the spectral path where
+    hardware helps without a change of algorithm. The tests that matter are the two
+    that could silently go wrong: identical output, and a worker count that respects
+    memory rather than core count.
+    """
+
+    def test_parallel_and_serial_produce_identical_grids(self, volume):
+        """Bit-identical, not merely close.
+
+        The per-tilt work touches no shared state, so any difference at all would
+        mean a real race rather than a tolerable reordering --- and a tolerance here
+        would hide exactly that.
+        """
+        shape, limits = (7, 21, 21), ((500.0, 6500.0), (-20e3, 20e3), (-20e3, 20e3))
+        serial = grid_volume(
+            volume, grid_shape=shape, grid_limits=limits, method="spectral"
+        )
+        parallel = grid_volume(
+            volume, grid_shape=shape, grid_limits=limits, method="spectral", n_jobs=4
+        )
+        left = np.ma.filled(serial.fields["reflectivity"]["data"], np.nan)
+        right = np.ma.filled(parallel.fields["reflectivity"]["data"], np.nan)
+        np.testing.assert_array_equal(left, right)
+
+    def test_the_cone_stack_stays_in_tilt_order(self, volume):
+        """Threads complete out of order; the stack must not.
+
+        ``ConeStack`` rows are indexed by tilt and the vertical interpolation reads
+        them as ordered by ascending elevation, so an order scrambled by completion
+        time would corrupt every column without failing anything loudly. Asserted on
+        ``build_cones`` rather than through ``grid_volume`` because that is where the
+        invariant lives --- the grid does not carry the per-tilt reports.
+        """
+        geometries = dedup_sweeps(census_radar(volume))
+        serial = build_cones(volume, geometries, half_width_m=20e3, spacing_m=2000.0)
+        parallel = build_cones(
+            volume, geometries, half_width_m=20e3, spacing_m=2000.0, n_jobs=4
+        )
+
+        expected = [float(g.fixed_angle) for g in geometries]
+        assert [r.fixed_angle for r in parallel.reports] == expected
+        assert [r.tilt_index for r in parallel.reports] == list(range(len(expected)))
+        np.testing.assert_array_equal(parallel.fixed_angle, serial.fixed_angle)
+        np.testing.assert_array_equal(
+            np.nan_to_num(parallel.reflectivity), np.nan_to_num(serial.reflectivity)
+        )
+
+
+class TestTheWorkerCountRespectsMemoryNotCores:
+    """A core-count default would swap on the domains this operator is used on."""
+
+    def test_the_default_is_serial(self):
+        """Unchanged memory profile unless a caller opts in."""
+        assert resolve_tilt_workers(None, 15, 85_500.0, 1000.0) == 1
+        assert resolve_tilt_workers(1, 15, 85_500.0, 1000.0) == 1
+
+    def test_a_fine_lattice_caps_below_the_core_count(self):
+        """The case that motivates the function.
+
+        A 171 km domain at 250 m is ~470k cells per tilt and the evaluator's
+        upsampled working set reaches ~1 GB, so fifteen at once would need more
+        memory than the machine has. The cap must bind, and it must warn: silently
+        running fewer workers than asked would look like the parallelism not working.
+        """
+        coarse = resolve_tilt_workers(-1, 15, 85_500.0, 2000.0)
+        with pytest.warns(ResourceWarning, match="working memory"):
+            fine = resolve_tilt_workers(-1, 15, 85_500.0, 100.0)
+        assert fine < coarse
+        assert fine >= 1
+
+    def test_it_never_asks_for_more_workers_than_tilts(self):
+        """Six-tilt volumes do not benefit from sixty workers."""
+        assert resolve_tilt_workers(-1, 3, 20_000.0, 2000.0) <= 3
+
+    def test_a_nonsense_request_is_rejected_rather_than_clamped(self):
+        """``n_jobs=0`` is a mistake, not a request for serial execution."""
+        for bad in (0, -2, -7):
+            with pytest.raises(ValueError, match="n_jobs"):
+                resolve_tilt_workers(bad, 15, 20_000.0, 1000.0)

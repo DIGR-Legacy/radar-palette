@@ -23,6 +23,10 @@ thing that makes a tilt a cone rather than a plane.
 
 from __future__ import annotations
 
+import os
+import re
+import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -253,6 +257,96 @@ class ConeStack:
     reports: list = field(default_factory=list)
 
 
+# Bytes per lattice cell held live by one in-flight tilt. The evaluator's upsampled
+# working arrays dominate, and there are several of them (float64 slant range,
+# azimuth, height, X, Y, the gridded output, plus the evaluator's own internals),
+# so this is measured-generous rather than derived: at 250 m over a 171 km domain
+# one tilt peaks near 1 GB, which is ~1.4 kB per cell of the 684k-cell lattice.
+TILT_BYTES_PER_CELL = 1400.0
+
+# Leave this much of the machine's memory alone. Gridding is not the only thing
+# running, and a swapping parallel run is slower than a serial one.
+MEMORY_HEADROOM_FRAC = 0.5
+
+
+def resolve_tilt_workers(n_jobs, n_tilts, half_width_m, spacing_m):
+    """Decide how many tilts to grid concurrently.
+
+    Tilts are independent, so the arithmetic is embarrassingly parallel --- but
+    memory, not cores, is what binds. One in-flight tilt holds an upsampled lattice
+    that reaches the order of a gigabyte on a wide domain at fine spacing, so a
+    core-count default would try to hold fifteen of those at once and swap. This
+    caps the pool at whatever the free memory can hold and warns rather than
+    silently over-subscribing.
+
+    Parameters
+    ----------
+    n_jobs : int or None
+        Requested workers. ``None`` or ``1`` grids serially; ``-1`` requests one per
+        core; a positive integer requests that many. An explicit request is honoured
+        up to the memory cap.
+    n_tilts : int
+        Tilts to grid --- never worth more workers than this.
+    half_width_m, spacing_m : float
+        Lattice geometry, which sets the per-tilt memory estimate.
+
+    Returns
+    -------
+    int
+        Workers to use, at least 1.
+    """
+    if n_jobs is None or n_jobs == 1:
+        return 1
+    if n_jobs == 0 or n_jobs < -1:
+        raise ValueError(f"n_jobs must be -1, or a positive integer, got {n_jobs!r}")
+
+    cores = os.cpu_count() or 1
+    requested = cores if n_jobs == -1 else int(n_jobs)
+    requested = min(requested, n_tilts, cores)
+
+    cells = (2.0 * half_width_m / spacing_m + 1.0) ** 2
+    per_tilt_bytes = cells * TILT_BYTES_PER_CELL
+    budget = _available_bytes() * MEMORY_HEADROOM_FRAC
+    affordable = max(int(budget // per_tilt_bytes), 1)
+
+    if affordable < requested:
+        warnings.warn(
+            f"gridding {requested} tilts concurrently needs about "
+            f"{requested * per_tilt_bytes / 1e9:.1f} GB of working memory for a "
+            f"{2 * half_width_m / 1e3:.0f} km domain at {spacing_m:.0f} m; using "
+            f"{affordable} worker(s) to stay inside the available "
+            f"{budget / 1e9:.1f} GB. Coarsen the grid or pass a smaller n_jobs to "
+            f"silence this.",
+            ResourceWarning,
+            stacklevel=3,
+        )
+    return max(min(requested, affordable), 1)
+
+
+def _available_bytes():
+    """Free physical memory, falling back to a conservative guess."""
+    try:  # Linux, and anything else exposing the POSIX name
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:  # macOS: vm_stat is the only portable-enough source without psutil
+        import subprocess
+
+        out = subprocess.run(
+            ["vm_stat"], capture_output=True, text=True, timeout=5
+        ).stdout
+        page = int(re.search(r"page size of (\d+)", out).group(1))
+        free = sum(
+            int(match.group(1))
+            for name in ("Pages free", "Pages inactive", "Pages speculative")
+            for match in [re.search(rf"{name}:\s+(\d+)", out)]
+            if match
+        )
+        return free * page
+    except Exception:
+        return 2 * 1024**3
+
+
 def build_cones(
     radar,
     geometries,
@@ -267,6 +361,7 @@ def build_cones(
     fill_method="edge",
     up_az=4,
     up_r=4,
+    n_jobs=None,
 ):
     """Spectrally grid every sweep onto one shared horizontal lattice.
 
@@ -298,20 +393,40 @@ def build_cones(
     up_az, up_r : int, optional
         Upsampling factors for the evaluator's fast path.
 
+    n_jobs : int, optional
+        Tilts to grid concurrently. Defaults to ``None`` (serial), which keeps the
+        memory profile of previous releases. ``-1`` requests one worker per core.
+        Tilts are independent so this is close to linear in wall time, but the cap
+        that matters is memory rather than cores --- see
+        :func:`resolve_tilt_workers`, which reduces an over-ambitious request and
+        says so rather than swapping.
+
     Returns
     -------
     ConeStack
 
     Notes
     -----
-    Tilts are gridded one at a time and each evaluator is released before the next is
-    built. The extended, upsampled lattice for a single wide sweep can reach the order
-    of a gigabyte, so a volume's worth of evaluators cannot coexist in memory.
+    Each tilt's evaluator is released as soon as its cone is built. The extended,
+    upsampled lattice for one wide sweep can reach the order of a gigabyte, which is
+    why ``n_jobs`` is bounded by available memory and why the default stays serial:
+    a volume's worth of evaluators cannot coexist.
     """
-    cones, heights, masks, reports = [], [], [], []
-    axes = None
+    evaluator_kwargs = {"band_frac": band_frac}
+    if n_cg is not None:
+        evaluator_kwargs["n_cg"] = n_cg
+    # Left unset rather than defaulted here, so the evaluator's own defaults stay
+    # the single source of truth for what an unconfigured call does.
+    if az_engine is not None:
+        evaluator_kwargs["az_engine"] = az_engine
+    if az_solver is not None:
+        evaluator_kwargs["az_solver"] = az_solver
+    if az_ridge is not None:
+        evaluator_kwargs["az_ridge"] = az_ridge
 
-    for tilt_index, geometry in enumerate(geometries):
+    def grid_one_tilt(indexed_geometry):
+        """Grid one tilt. Reads ``radar``; writes nothing shared."""
+        tilt_index, geometry = indexed_geometry
         start, end = radar.get_start_end(geometry.sweep)
         azimuths = np.asarray(radar.azimuth["data"][start : end + 1], dtype=np.float64)
         observed = radar.fields[field_name]["data"][start : end + 1]
@@ -324,20 +439,6 @@ def build_cones(
             geometry.range_first_m,
             geometry.range_max_valid_m,
         )
-        if axes is None:
-            axes = (lattice["x"], lattice["y"])
-
-        evaluator_kwargs = {"band_frac": band_frac}
-        if n_cg is not None:
-            evaluator_kwargs["n_cg"] = n_cg
-        # Left unset rather than defaulted here, so the evaluator's own defaults
-        # stay the single source of truth for what an unconfigured call does.
-        if az_engine is not None:
-            evaluator_kwargs["az_engine"] = az_engine
-        if az_solver is not None:
-            evaluator_kwargs["az_solver"] = az_solver
-        if az_ridge is not None:
-            evaluator_kwargs["az_ridge"] = az_ridge
         evaluator = SweepSpectralEvaluator(
             filled, geometry, azimuths, **evaluator_kwargs
         )
@@ -351,36 +452,53 @@ def build_cones(
             up_r=up_r,
         )
 
-        cones.append(np.where(in_range, gridded, np.nan).astype(np.float32))
-        heights.append(
-            np.where(in_range, lattice["height_m"], np.nan).astype(np.float32)
-        )
-        masks.append(in_range.copy())
-
         measured = filled[~input_mask] if (~input_mask).any() else np.array([np.nan])
         data_min, data_max = float(np.nanmin(measured)), float(np.nanmax(measured))
         grid_min, grid_max = float(np.nanmin(gridded)), float(np.nanmax(gridded))
-        reports.append(
-            TiltReport(
-                tilt_index=tilt_index,
-                sweep=int(geometry.sweep),
-                fixed_angle=float(geometry.fixed_angle),
-                sweep_class=str(geometry.sweep_class),
-                azimuth_path=evaluator.report.az_path,
-                nrays=int(geometry.nrays),
-                masked_input_fraction=float(input_mask.mean()),
-                valid_fraction=float(in_range.mean()),
-                height_min_m=float(np.nanmin(lattice["height_m"][in_range])),
-                height_max_m=float(np.nanmax(lattice["height_m"][in_range])),
-                data_min_dbz=data_min,
-                data_max_dbz=data_max,
-                grid_min_dbz=grid_min,
-                grid_max_dbz=grid_max,
-                overshoot_db=float(max(grid_max - data_max, data_min - grid_min)),
-                split_cut_size=int(geometry.split_cut_size),
-            )
+        report = TiltReport(
+            tilt_index=tilt_index,
+            sweep=int(geometry.sweep),
+            fixed_angle=float(geometry.fixed_angle),
+            sweep_class=str(geometry.sweep_class),
+            azimuth_path=evaluator.report.az_path,
+            nrays=int(geometry.nrays),
+            masked_input_fraction=float(input_mask.mean()),
+            valid_fraction=float(in_range.mean()),
+            height_min_m=float(np.nanmin(lattice["height_m"][in_range])),
+            height_max_m=float(np.nanmax(lattice["height_m"][in_range])),
+            data_min_dbz=data_min,
+            data_max_dbz=data_max,
+            grid_min_dbz=grid_min,
+            grid_max_dbz=grid_max,
+            overshoot_db=float(max(grid_max - data_max, data_min - grid_min)),
+            split_cut_size=int(geometry.split_cut_size),
+        )
+        entry = (
+            np.where(in_range, gridded, np.nan).astype(np.float32),
+            np.where(in_range, lattice["height_m"], np.nan).astype(np.float32),
+            in_range.copy(),
+            report,
+            (lattice["x"], lattice["y"]),
         )
         del evaluator, gridded, lattice, filled, input_mask
+        return entry
+
+    indexed = list(enumerate(geometries))
+    workers = resolve_tilt_workers(n_jobs, len(indexed), half_width_m, spacing_m)
+    if workers == 1:
+        results = [grid_one_tilt(item) for item in indexed]
+    else:
+        # Threads, not processes: the per-tilt cost is NumPy/SciPy linear algebra and
+        # FFTs, which release the GIL, and a process pool would have to pickle the
+        # radar object to every worker -- hundreds of megabytes for a research volume.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(grid_one_tilt, indexed))
+
+    cones = [entry[0] for entry in results]
+    heights = [entry[1] for entry in results]
+    masks = [entry[2] for entry in results]
+    reports = [entry[3] for entry in results]
+    axes = results[0][4]
 
     return ConeStack(
         reflectivity=np.stack(cones),

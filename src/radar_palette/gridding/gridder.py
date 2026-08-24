@@ -151,6 +151,7 @@ def _grid_spectrally(
     fill_method="edge",
     up_az=4,
     up_r=4,
+    n_jobs=None,
 ):
     """Grid one volume by per-sweep spectral evaluation plus vertical interpolation."""
     import pyart
@@ -189,6 +190,7 @@ def _grid_spectrally(
         fill_method=fill_method,
         up_az=up_az,
         up_r=up_r,
+        n_jobs=n_jobs,
     )
 
     east_axis_m = np.linspace(x_min, x_max, n_east)
@@ -339,11 +341,14 @@ def grid_volume(
     **gridding_kwargs
         Passed to the chosen backing. For ``"spectral"`` these are ``field_name``,
         ``scheme``, ``band_frac``, ``n_cg``, ``az_engine``, ``az_solver``,
-        ``az_ridge``, ``fill_method``, ``up_az`` and ``up_r``. The three ``az_*``
+        ``az_ridge``, ``fill_method``, ``up_az``, ``up_r`` and ``n_jobs``. The
+        three ``az_*``
         arguments choose the azimuth NUFFT backend and the solve on top of it
         (:mod:`radar_palette.gridding.nufft_engines`); they matter here because
         the spectral cost is dominated by building one evaluator per sweep, so it
         is flat in output resolution and set almost entirely by that choice.
+        ``n_jobs`` grids that many tilts concurrently; tilts are independent, so
+        wall time falls close to linearly until memory binds.
         For ``"pyart"`` these reach :func:`pyart.map.grid_from_radars` unchanged, and
         ``roi_func`` is the consequential one: the default beam-width radius leaves
         interior holes between widely separated tilts. See the module docstring for the

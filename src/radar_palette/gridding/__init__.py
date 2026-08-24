@@ -77,6 +77,7 @@ from radar_palette.gridding.cones import (
     build_cones,
     cone_range_height,
     dedup_sweeps,
+    resolve_tilt_workers,
     target_lattice,
 )
 from radar_palette.gridding.evaluator import (
@@ -151,6 +152,7 @@ __all__ = [
     "EngineUnavailableError",
     "available_engines",
     "make_operator",
+    "resolve_tilt_workers",
     "EARTH_RADIUS_EFFECTIVE_M",
     "EvalReport",
     "LinearReflectivityError",

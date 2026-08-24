@@ -8,6 +8,23 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `build_cones(..., n_jobs=...)` and `grid_volume(..., method="spectral", n_jobs=...)`
+  grid tilts concurrently. Tilts are independent, so this is the one place in the
+  spectral path where hardware helps without changing the algorithm, and on a
+  15-tilt volume the serial loop left most of a 14-core machine idle.
+  - **Threads, not processes.** The per-tilt cost is NumPy/SciPy linear algebra and
+    FFTs, which release the GIL; a process pool would pickle the radar object to
+    every worker, hundreds of megabytes for a research volume.
+  - **The cap is memory, not cores** — `resolve_tilt_workers` sizes the pool from
+    free memory and the per-tilt lattice, warns when it reduces a request, and
+    defaults to serial so the memory profile of previous releases is unchanged.
+    One in-flight tilt reaches ~1 GB on a 171 km domain at 250 m, so `n_jobs=-1`
+    resolves to 14 workers at 2 km and 8 at 250 m on the same machine.
+  - Tests assert the parallel and serial grids are *bit-identical* (any difference
+    would be a race, not a tolerable reordering) and that the cone stack stays in
+    ascending-elevation order regardless of completion order.
+- `resolve_tilt_workers` is exported from `radar_palette.gridding`.
+
 - `radar_palette.gridding.nufft_engines`: interchangeable backends for the azimuth
   NUFFT, and interchangeable solvers on top of them. `nufft.py` is unchanged and
   remains the reference every engine is measured against; `make_operator(...,
