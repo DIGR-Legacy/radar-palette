@@ -6,7 +6,69 @@ git tags via `setuptools-scm`.
 
 ## [Unreleased]
 
+### Added
+
+- `radar_palette.gridding.nufft_engines`: interchangeable backends for the azimuth
+  NUFFT, and interchangeable solvers on top of them. `nufft.py` is unchanged and
+  remains the reference every engine is measured against; `make_operator(...,
+  engine=...)` selects who computes the transforms and `solve(..., solver=...)`
+  how the normal equations are solved. The evaluator exposes both as `az_engine`
+  and `az_solver`, and records which pair ran in its report.
+  - Engines: `reference` (`nufft.py` itself), `scipy` (default), `dense`,
+    `finufft`, `ducc0`, `torch`. Availability is checked at construction, never at
+    import, so a minimal install keeps working and asking for an absent engine
+    raises a message naming the extra to install rather than an `ImportError`.
+  - The default engine needs **no new dependency** and is the reference algorithm
+    with two exact substitutions: the Kaiser-Bessel spreading stencil becomes one
+    CSR matrix (replacing `np.add.at`, an unbuffered scatter that was 38% of solve
+    time) and the spread-to-spectrum transform becomes `rfft` (the spread field is
+    real, so the reference computed a conjugate-symmetric half it then discarded).
+    Both are arithmetic-preserving: agreement with `nufft.py` is 1.5e-15. Measured
+    speedup on the CG path is 1.9-2.3x for sweeps of 360 rays and up.
+  - The `dense` engine has no interpolation kernel at all — it forms the DFT
+    matrix. That is affordable here, and only here, because on the azimuth axis
+    the matrix is `n_rays x n_modes` and both are ray counts (8 MB at 720 rays).
+    It is therefore exact to round-off, needs no dependency, and is the fastest
+    engine below ~720 rays; `finufft` overtakes it past ~1440, which is the
+    `O(n log n)` versus `O(n^2)` crossover.
+  - `solver='direct'` factorises the normal equations instead of iterating on
+    them, reaching the least-squares solution CG approaches (verified against
+    CG run to 1e-14). It is 10-30x faster than 12 CG iterations, against about 2x
+    for the fastest engine change — the solver is the larger of the two effects.
+  - **The accuracy gain belongs to the engine/solver pair, not to the solver.**
+    On a field exactly band-limited on the lattice, so the correct answer is known
+    in closed form: `direct` on `dense` or `finufft` recovers it to ~1e-10 against
+    ~3e-5 for 12 CG iterations, but `direct` on a Kaiser-Bessel engine converges
+    to that engine's own ~3e-4 kernel error and gains nothing at low jitter. A
+    test asserts each half of that, because a reader who took the headline figure
+    for a property of `solver='direct'` alone would be wrong.
+  - What `direct` improves on *every* engine is degraded sampling, where what
+    fails is the conditioning rather than the kernel: at ±0.45-spacing jitter,
+    12 iterations reach 1.7e-2 against 4.5e-4 for the direct solve on the same
+    transforms. Its `ridge` is likewise not cosmetic — a sector's normal matrix is
+    singular by construction (a 30-120° sector at 1° spacing fits 91 rays onto a
+    366-point lattice) and a bare Cholesky fails on it. Regularised, the direct
+    solve fits the measured rays to 8.9e-11 where 12 iterations reach 3.7e-4.
+  - `benchmarks/bench_nufft_engines.py` regenerates every figure quoted above.
+    Timings are hardware-dependent and the quoted ones are from an arm64 laptop.
+
 ### Changed
+
+- The evaluator's `NON_UNIFORM` path now runs on the `scipy` engine rather than
+  `nufft.py` directly, which is ~2x faster and agrees to round-off (1e-13 measured
+  end-to-end on the evaluated field, asserted by a test). `az_engine='reference'`
+  restores the original code path exactly. Note that the other engines are *not*
+  round-off equivalent: `dense`, `finufft`, `ducc0` and `torch` each shift the
+  answer by ~5e-4, since they replace the reference's Kaiser-Bessel kernel (whose
+  own error is 2.5e-4) with a different or exact transform. The shift is towards
+  exact arithmetic, but it is a shift.
+- The NUFFT path's report `extras` now include `engine` and `solver`, and the
+  kernel-parameter keys are supplied by the engine. `finufft`/`ducc0` report `eps`
+  in place of `kb_beta`/`M_oversampled`, since a kernel width is not what sets
+  their accuracy. `adjoint_test_rel` is measured per engine, not inherited.
+- `az_solver` is validated in the constructor rather than where it is consumed.
+  Only one of the three azimuth paths reads it, so a typo would otherwise pass
+  silently on a uniform sweep and fail later on a jittered one.
 
 - The `gridding` module docstring no longer claims the distance-weighted path "degrades
   gracefully where sampling is poor". It does not: the radius of influence is a fixed

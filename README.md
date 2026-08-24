@@ -79,9 +79,34 @@ machinery is behind extras so a minimal install stays light:
 | Extra | Pulls | Needed for |
 | --- | --- | --- |
 | `advection` | `scikit-image` | optical-flow motion estimation |
-| `spectral` | `finufft` | non-uniform FFT gridding |
-| `all` | both of the above | |
+| `spectral` | `finufft` | faster, more accurate non-uniform FFT engine |
+| `spectral-ducc` | `ducc0` | alternative NUFFT engine |
+| `spectral-torch` | `torch`, `torchkbnufft` | GPU-capable NUFFT engine |
+| `all` | `advection` + `spectral` | |
+| `engines` | every NUFFT engine | benchmarking, engine-equivalence tests |
 | `test`, `docs`, `dev` | tooling | development |
+
+None of the `spectral*` extras is required. The non-uniform gridding path runs on
+`numpy`/`scipy` alone and reproduces the original implementation to round-off;
+the extras are alternative **engines** for the same operator, selected per call:
+
+```python
+from radar_palette.gridding.evaluator import SweepSpectralEvaluator
+from radar_palette.gridding.nufft_engines import available_engines
+
+available_engines()  # what this environment supports
+
+# Exact transform, no kernel error, no extra dependency -- and, paired with the
+# direct solver, ~1e-10 recovery of a band-limited field against ~3e-4 for the
+# iterative default, about 30x faster.
+SweepSpectralEvaluator(
+    values, geometry, azimuths, az_engine="dense", az_solver="direct"
+)
+```
+
+`benchmarks/bench_nufft_engines.py` prints the accuracy and timing tables for
+whichever engines are installed. See
+`radar_palette.gridding.nufft_engines` for which engine to pick and why.
 
 ## Development
 

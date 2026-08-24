@@ -30,10 +30,28 @@ that everything advertised there is importable.
 ## Conventions
 
 - **Docstrings**: numpydoc, enforced by `ruff` (pydocstyle, `convention = "numpy"`).
-- **Optional dependencies**: `scikit-image` and `finufft` are optional. Guard them
-  at the call site with a clear error, and gate tests with the `requires_skimage`
-  / `requires_finufft` markers in `tests/conftest.py` so a minimal install still
-  collects a green suite.
+- **Optional dependencies**: `scikit-image`, `finufft`, `ducc0` and
+  `torch`/`torchkbnufft` are optional. Guard them at the call site with a clear
+  error, and gate tests with the `requires_skimage` / `requires_finufft` markers in
+  `tests/conftest.py` so a minimal install still collects a green suite. A NUFFT
+  engine is guarded by `nufft_engines._require`, which names the extra to install;
+  `tests/gridding/test_nufft_engines.py` skips per engine via `engine_or_skip`.
+- **A new NUFFT engine owes three tests**: the adjoint identity on itself (a
+  correct forward paired with a mis-scaled adjoint breaks both solvers and no
+  smoothness check would notice), agreement with `nufft.py` to within the
+  reference's own kernel error, and agreement with exact trig-polynomial
+  arithmetic if it claims to beat that kernel. The second without the third is not
+  enough: `torchkbnufft` initially passed its adjoint test perfectly while sitting
+  69% away from the correct answer, because a consistently wrong pair of operators
+  is still a consistent pair. Watch the phase convention — each library has its
+  own, and the mismatch is invisible to every test that compares an engine only
+  against itself.
+- **Engine speed and engine accuracy are separate claims**: quote them separately
+  and say which engine a figure belongs to. The direct solver's ~1e-10 recovery is
+  a property of the *pair* (exact engine plus direct solve); on a Kaiser-Bessel
+  engine the same solver converges to the kernel's ~3e-4 and buys nothing at low
+  jitter. Regenerate figures with `benchmarks/bench_nufft_engines.py` rather than
+  copying them forward.
 - **Units in docstrings**: always. Metres, seconds, degrees, dBZ.
 - **No extrapolation, ever**: a vertical target outside the observed cone span gets
   NaN and a `VerticalFlag`, never a guessed value. Keep the invariant that finite

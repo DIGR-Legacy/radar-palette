@@ -20,6 +20,14 @@ Azimuth: three paths, chosen by sweep class
     Kaiser-Bessel NUFFT gridding, refined by conjugate gradients. See
     :mod:`radar_palette.gridding.nufft`.
 
+    The transforms themselves are supplied by an interchangeable *engine* and the
+    solve on top of them by an interchangeable *solver*
+    (:mod:`radar_palette.gridding.nufft_engines`), selected with ``az_engine`` and
+    ``az_solver``. The defaults reproduce the reference implementation to
+    round-off while running about twice as fast; ``az_solver='direct'`` replaces
+    the iteration with a factorisation of the same system, which is both more
+    accurate and faster still.
+
     **The refinement is on by default**, which departs from the research code this
     was ported from. Convolution gridding computes the *adjoint* of the sampling
     operator, not its inverse, and the difference is not academic: on a constant
@@ -73,7 +81,12 @@ import numpy as np
 from scipy.fft import fft2, ifft2
 
 from radar_palette.gridding.census import SweepClass
-from radar_palette.gridding.nufft import _AzimuthNufftOperator
+from radar_palette.gridding.nufft_engines import (
+    DEFAULT_ENGINE,
+    DEFAULT_SOLVER,
+    SOLVERS,
+    make_operator,
+)
 from radar_palette.gridding.reflectivity import (
     DBZ_PHYSICAL_CEILING,
     LinearReflectivityError,
@@ -193,9 +206,37 @@ class SweepSpectralEvaluator:
     n_cg : int, optional
         Conjugate-gradient refinement iterations for the NUFFT path. Defaults to
         ``DEFAULT_CG_ITERATIONS``; pass 0 for classical gridding only. See the module
-        docstring for why the default is not 0.
+        docstring for why the default is not 0. Ignored when ``az_solver='direct'``,
+        which has no iteration count.
     cg_tol : float, optional
         Relative residual at which the refinement stops early.
+    az_engine : str, optional
+        Which NUFFT backend computes the transforms on the ``NON_UNIFORM`` path:
+        ``'scipy'`` (default, no dependency beyond numpy/scipy), ``'reference'``,
+        ``'dense'``, ``'finufft'``, ``'ducc0'`` or ``'torch'``. See
+        :mod:`radar_palette.gridding.nufft_engines`.
+
+        Only ``'reference'`` and ``'scipy'`` reproduce the existing implementation
+        to round-off; for those two, choosing an engine is purely a performance
+        decision. ``'dense'``, ``'finufft'``, ``'ducc0'`` and ``'torch'`` all
+        change the answer by ~5e-4, because each uses a different (in the case of
+        ``'dense'``, exact) transform in place of the reference's Kaiser-Bessel
+        kernel, whose own error at the default ``kb_width``/``oversamp`` is 2.5e-4.
+        The shift is towards exact arithmetic rather than away from it, but it is a
+        shift, and it is larger than the difference the ``az_solver`` choice makes
+        on a Kaiser-Bessel engine.
+    az_solver : {'cg', 'direct'}, optional
+        How the NUFFT path solves the density-weighted normal equations.
+        ``'cg'`` (default) is the existing conjugate-gradient refinement.
+        ``'direct'`` factorises the same system instead of iterating on it, which
+        on a measured band-limited field is roughly six orders of magnitude more
+        accurate and about 30x faster; it is not the default only because it
+        changes numbers a caller may be relying on.
+    az_ridge : float, optional
+        Regularisation for ``az_solver='direct'``, relative to the mean diagonal
+        of the normal matrix. Required for sectors, whose normal matrix is
+        singular by construction. Defaults to
+        :data:`~radar_palette.gridding.nufft_engines.DEFAULT_RIDGE`.
     r0_m, dr_m : float, optional
         Override the census range axis. Sweeps with differing range axes therefore
         need no resampling.
@@ -223,6 +264,9 @@ class SweepSpectralEvaluator:
         band_frac=1.0,
         n_cg=DEFAULT_CG_ITERATIONS,
         cg_tol=1e-10,
+        az_engine=DEFAULT_ENGINE,
+        az_solver=DEFAULT_SOLVER,
+        az_ridge=None,
         r0_m=None,
         dr_m=None,
         field_units=None,
@@ -236,6 +280,14 @@ class SweepSpectralEvaluator:
         if field_units is not None and field_units not in FIELD_UNITS:
             raise ValueError(
                 f"unknown field_units {field_units!r}; expected one of {FIELD_UNITS}"
+            )
+        # Validated here, with the other constructor arguments, rather than where
+        # it is used: only one of the three azimuth paths consults it, so a typo
+        # would otherwise pass silently on a uniform sweep and fail on the next
+        # jittered one.
+        if az_solver not in SOLVERS:
+            raise ValueError(
+                f"unknown az_solver {az_solver!r}; expected one of {SOLVERS}"
             )
 
         sweep_values = np.asarray(values, dtype=np.float64)
@@ -268,6 +320,9 @@ class SweepSpectralEvaluator:
         self.band_frac = float(band_frac)
         self.n_cg = int(n_cg)
         self.cg_tol = float(cg_tol)
+        self.az_engine = az_engine
+        self.az_solver = az_solver
+        self.az_ridge = az_ridge
         self._dense = None
 
         extras = {"field_units": resolved_units}
@@ -396,26 +451,38 @@ class SweepSpectralEvaluator:
         )
 
     def _nufft_lattice(self, values, azimuths):
-        """Recover a uniform lattice from non-uniform rays by KB gridding."""
-        operator = _AzimuthNufftOperator(
+        """Recover a uniform lattice from non-uniform rays by KB gridding.
+
+        The engine supplies the transforms and the solver consumes them; both are
+        reported, because which one was used determines the accuracy guarantee.
+        ``adjoint_test_rel`` is measured on whichever engine ran --- an engine
+        whose adjoint were not the transpose of its forward would invalidate the
+        solve, so the check is per-engine and not inherited.
+        """
+        operator = make_operator(
             azimuths,
             self.geometry,
+            engine=self.az_engine,
             kb_width=self.kb_width,
             oversamp=self.oversamp,
         )
-        lattice, info = operator.solve(values, n_cg=self.n_cg, cg_tol=self.cg_tol)
+        lattice, info = operator.solve(
+            values,
+            n_cg=self.n_cg,
+            cg_tol=self.cg_tol,
+            solver=self.az_solver,
+            ridge=self.az_ridge,
+        )
         self.M = operator.n_lattice
         self.phi0 = 0.0
-        extras = {
-            "kb_width": self.kb_width,
-            "oversamp": self.oversamp,
-            "kb_beta": operator.beta,
-            "n_nominal": operator.n_lattice,
-            "M_oversampled": operator.n_oversampled,
-            "density_w_min": float(operator.weights.min()),
-            "density_w_max": float(operator.weights.max()),
-            "adjoint_test_rel": operator.adjoint_test(),
-        }
+        extras = dict(operator.describe())
+        extras.update(
+            {
+                "density_w_min": float(operator.weights.min()),
+                "density_w_max": float(operator.weights.max()),
+                "adjoint_test_rel": operator.adjoint_test(),
+            }
+        )
         extras.update(info)
         return lattice, "nufft_kb", extras
 
