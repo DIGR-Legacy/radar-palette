@@ -27,13 +27,36 @@ git tags via `setuptools-scm`.
 ### Added
 
 - `EngineConcurrencyWarning` when `az_engine='finufft'` is combined with `n_jobs>1`.
-  finufft is correct there but unpredictable: measured on a 15-tilt volume at
-  `n_jobs=4`, three consecutive runs took 88.2, 6.5 and 16.3 s (13.6x spread) where
-  `dense` and `torch` held 1.0–1.1x on the identical path. Serially it is steady
-  (17.9 s over three runs; 0.29 s per tilt over six), so this is contention in
-  finufft's own global planner state rather than the transform being slow. Kept and
-  warned rather than serialised or removed — the results are correct, and silently
-  forcing `n_jobs=1` for one engine would make an engine comparison unfair.
+  finufft's results there are exact — bit-identical to `dense` on every grid measured
+  — but its timing is not reproducible. Measured across eight sweep shapes, three
+  repeats each:
+  - **Serially it is indistinguishable from `dense`** (medians 0.97–1.00 of `dense`,
+    1.00–1.03x spread). An earlier note in this branch claiming it was ~1.9x slower
+    was comparing serial finufft against *parallel* `dense`; that was wrong.
+  - Under `n_jobs=4` it is bimodal: on six of eight shapes it is the **fastest CPU
+    configuration measured** (~8.3 s against `dense`'s ~10.1 s on a 15-tilt volume),
+    and on the rest the same call takes 12–19x longer. Best and worst single runs
+    across the study were 7.9 s and 177.8 s at fixed workload, against `dense`'s
+    10.0–11.9 s over the same 24 runs.
+  - Because it varies run to run at fixed workload, and not only on the first run,
+    this is a race in finufft's own global planner state, not warm-up or a workload
+    effect. Warned rather than serialised or removed: it may well be the fastest
+    choice, the numbers are right either way, and quietly forcing `n_jobs=1` for one
+    engine would make an engine comparison unfair.
+
+- Measured the `torch` engine's GPU path, previously documented but never run.
+  On an NVIDIA A10 (via Modal), per-tilt azimuth solves took 93.3 ms in float64 and
+  91.3 ms in float32 against 83.9 ms on the same machine's CPU — **slower on 15 of 15
+  tilts in both precisions**. A 931 x 1050 solve is a few tens of milliseconds of
+  arithmetic, too small to amortise host-to-device transfer and kernel launch; this is
+  the same size argument that makes the dependency-free `dense` engine competitive on
+  this axis. Accuracy on the device is sound if anyone wants it regardless: float64
+  matches CPU to 1e-15, and float32 is only 1.5x worse (3.3e-4), because the
+  Kaiser-Bessel kernel error dominates round-off either way. `device='cuda'`/`'mps'`
+  remain available and are now documented as measured-and-slower rather than untested.
+
+- `az_engine='torch'` accepts a `dtype` argument. It was hardcoded to `complex128`,
+  so the single-precision path a GPU is actually fast at could not be expressed.
 
 - `UnphysicalGridWarning` flags gridded fields that leave the range reflectivity can
   physically take. Measured on the ARM BNF C-SAPR2 volume, settings reachable

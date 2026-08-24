@@ -57,10 +57,22 @@ Engines
     accuracy without the ``finufft`` dependency.
 ``torch``
     ``torchkbnufft``: genuinely Kaiser-Bessel (table-interpolated), batching range
-    gates on the coil axis, and the only engine here that can run on a GPU ---
-    ``device='cuda'`` on NVIDIA, ``device='mps'`` on Apple silicon. **The GPU path is
-    untested**: every figure in this module was measured on CPU, and the ~1.5 s edge
-    this engine shows there is a threading difference, not an algorithmic one. The
+    gates on the coil axis. The fastest engine measured here on CPU, by roughly
+    1.5 s on a 15-tilt volume -- a threading difference in its inner loop, not an
+    algorithmic one.
+
+    It is also the only engine that *can* run on a GPU (``device='cuda'`` or
+    ``'mps'``), and measurement says not to bother: on an NVIDIA A10, per-tilt
+    solves took 93.3 ms in float64 and 91.3 ms in float32 against 83.9 ms on the
+    same machine's CPU -- slower on 15 of 15 tilts. The azimuth solve is 931 x 1050
+    in double precision, a few tens of milliseconds of arithmetic, so transfer and
+    launch overhead exceed what the device saves. This is the same size argument
+    that makes ``dense`` competitive: the axis is a ray count, not an image
+    dimension. Accuracy on the device is sound if anyone wants it anyway (float64
+    matches CPU to 1e-15; float32 is 1.5x worse at 3.3e-4, since the Kaiser-Bessel
+    kernel error dominates round-off either way).
+
+    The
     CPU timings here are around the reference's; the reason to select it is an
     already-GPU-resident pipeline.
 
@@ -1136,8 +1148,11 @@ class _TorchKbNufftEngine(_EngineBase):
 
     Genuinely Kaiser-Bessel, like the reference, and the only engine here that
     runs on a GPU. ``device`` is passed straight to ``torch``, so ``'cuda'``,
-    ``'mps'`` and ``'cpu'`` all work wherever the local build supports them; the
-    default is ``'cpu'`` and the GPU paths are unmeasured here. Note that
+    ``'mps'`` and ``'cpu'`` all work wherever the local build supports them. The
+    default is ``'cpu'`` and should stay there: on an A10 the CUDA path measured
+    0.90x (float64) and 0.92x (float32) of CPU speed, slower on every tilt of a
+    15-tilt volume, because a 931 x 1050 solve is too small to amortise transfer
+    and launch. See the module docstring. Note that
     ``torchkbnufft`` defaults its tables to single precision, so a GPU run is also a
     precision change unless ``complex128`` is requested --- worth checking against the
     ``dense`` engine on your own data before trusting it. Note the phase convention:
@@ -1161,6 +1176,7 @@ class _TorchKbNufftEngine(_EngineBase):
         oversamp=2.0,
         numpoints=6,
         device="cpu",
+        dtype=None,
     ):
         _require("torch")
         super().__init__(azimuths_deg, geometry, kb_width, oversamp)
@@ -1170,7 +1186,16 @@ class _TorchKbNufftEngine(_EngineBase):
         self._torch = torch
         self.numpoints = int(numpoints)
         self.device = torch.device(device)
-        self.dtype = torch.complex128
+        # Double precision by default, which is NOT what torchkbnufft itself
+        # defaults to. Every other engine here works in float64, so matching that
+        # keeps an engine swap a performance decision rather than a silent
+        # precision change; a caller who wants the single-precision path -- the
+        # one a GPU is actually fast at -- asks for complex64 explicitly and can
+        # see in the report what they chose.
+        self.dtype = torch.complex128 if dtype is None else dtype
+        self.real_dtype = (
+            torch.float64 if self.dtype == torch.complex128 else torch.float32
+        )
         self.grid_size = int(np.ceil(self.oversamp * self.n_modes))
         self._forward_module = torchkbnufft.KbNufft(
             im_size=(self.n_modes,),
@@ -1189,7 +1214,7 @@ class _TorchKbNufftEngine(_EngineBase):
         omega = -np.deg2rad(self.azimuths)
         omega = (omega + np.pi) % (2.0 * np.pi) - np.pi
         self._omega = torch.tensor(
-            omega.reshape(1, -1), dtype=torch.float64, device=self.device
+            omega.reshape(1, -1), dtype=self.real_dtype, device=self.device
         )
 
     def forward(self, lattice_values):

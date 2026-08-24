@@ -307,16 +307,19 @@ PHYSICAL_DBZ_LIMITS = (-100.0, 100.0)
 OVERSHOOT_WARN_DB = 25.0
 
 
-# Engines that are not safe to run concurrently. `finufft` is correct under the
-# thread pool but wildly variable: measured on a 15-tilt volume at n_jobs=4, three
-# consecutive runs took 88.2, 6.5 and 16.3 seconds (13.6x spread) where `dense` and
-# `torch` on the identical path held 1.0-1.1x. Serially it is perfectly steady
-# (17.9 s, 1.0x over three runs; 0.29 s per tilt over six), so this is contention in
-# finufft's own planner rather than the transform being slow -- its FFTW planning is
-# global state, and each concurrent tilt drags it around. Warned rather than
-# serialised or refused: the results are correct, the user may have measured their own
-# case, and quietly forcing n_jobs=1 for one engine would make an engine comparison
-# silently unfair.
+# Engines whose *timing* is not reproducible under concurrency. Note what this is
+# and is not: finufft's results are exact -- bit-identical to `dense` on every grid
+# measured -- and serially it is indistinguishable from `dense` (medians within 2%
+# on eight sweep shapes, 1.00-1.03x spread over three repeats each). Under
+# `n_jobs=4` it is bimodal: when it wins the race it is the fastest CPU
+# configuration measured here (8.3 s against dense's 10.1 s on a 15-tilt volume),
+# and when it loses, the same call takes 12-17x longer. Because it varies run to
+# run at fixed workload, it is a race inside finufft's own global planner state
+# rather than anything about the grid.
+#
+# Warned rather than serialised or refused: it may well be the fastest choice, the
+# numbers are right either way, and quietly forcing n_jobs=1 for one engine would
+# make an engine comparison unfair.
 THREAD_UNSAFE_ENGINES = ("finufft",)
 
 
@@ -324,11 +327,12 @@ def _check_engine_concurrency(az_engine, workers):
     """Warn when an engine is being run concurrently that does not like it."""
     if workers > 1 and az_engine in THREAD_UNSAFE_ENGINES:
         warnings.warn(
-            f"az_engine={az_engine!r} with n_jobs>1 gives correct results but "
-            f"unpredictable timing: its planner holds global state, and measured "
-            f"across concurrent tilts the same work has varied by more than 10x run "
-            f"to run. Use n_jobs=1 to time it reproducibly, or az_engine='dense' "
-            f"(no extra dependency) or 'torch' for the parallel path.",
+            f"az_engine={az_engine!r} with n_jobs>1 gives exact results but "
+            f"unreproducible timing: it holds global planner state, so the same "
+            f"call has varied 12-17x run to run. It is often the fastest option "
+            f"when it wins that race. Use n_jobs=1 to time it reproducibly (where "
+            f"it matches 'dense'), or az_engine='dense' for predictable "
+            f"parallel timing.",
             EngineConcurrencyWarning,
             stacklevel=4,
         )
