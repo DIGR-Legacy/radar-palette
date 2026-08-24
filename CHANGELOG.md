@@ -67,7 +67,8 @@ git tags via `setuptools-scm`.
     1e-2 wins 0.12 dB on real data but gives up eight orders of magnitude on a
     band-limited field, and generalised cross-validation recovers the synthetic
     case exactly then fails on real sweeps because it scores on training residual
-    — which is what overfitting minimises. **For real reflectivity pass
+    — which is what overfitting minimises (it returns the 1e-10 floor on four of
+    five BNF tilts whose measured optima are 1e-3..1e-2). **For real reflectivity pass
     `ridge=1e-2` explicitly** (that is what `DEFAULT_RIDGE` is); `--real`
     measures it for a given radar.
   - **Stratify by echo before reading any dB figure.** Over half the gates in a

@@ -302,9 +302,10 @@ TARGET_CONDITION = 1e2
 # smooth or simulated field would silently get a far worse answer.
 #
 # Generalised cross-validation was also tried as a data-driven replacement. It
-# recovers 1e-10 exactly on the synthetic case and then fails on real sweeps
-# (selecting 1e-10 on four BNF tilts whose optimum is 1e-2), because it scores on
-# training residual and overfitting is precisely what minimises that. Any rule
+# recovers 1e-10 exactly on the synthetic case and then fails on real sweeps: it
+# returns the 1e-10 floor on four of the five BNF tilts, whose measured optima are
+# 1e-2 (sweeps 3, 7, 11) and 1e-3 (sweep 14). It scores on training residual, and
+# overfitting is precisely what minimises that. Any rule
 # fitted on the measured rays has the same defect; distinguishing signal from
 # out-of-band noise needs held-out rays, which a solver call does not have.
 #

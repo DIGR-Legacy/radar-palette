@@ -261,6 +261,9 @@ def build_cones(
     field_name="reflectivity",
     band_frac=1.0,
     n_cg=None,
+    az_engine=None,
+    az_solver=None,
+    az_ridge=None,
     fill_method="edge",
     up_az=4,
     up_r=4,
@@ -278,6 +281,14 @@ def build_cones(
     field_name : str, optional
         Field to grid. Must be in dBZ; see
         :mod:`radar_palette.gridding.reflectivity`.
+    az_engine, az_solver, az_ridge : optional
+        Azimuth NUFFT backend, the solver on top of it, and that solver's
+        regularisation, forwarded to each
+        :class:`~radar_palette.gridding.evaluator.SweepSpectralEvaluator`. Left
+        unset by default so the evaluator's own defaults remain the single source
+        of truth. These are the consequential arguments for spectral gridding
+        cost: one evaluator is built per sweep and that build dominates, so the
+        total is nearly flat in output resolution and is set here.
     band_frac, n_cg : optional
         Passed to :class:`~radar_palette.gridding.SweepSpectralEvaluator`. ``n_cg``
         defaults to the evaluator's own default.
@@ -319,6 +330,14 @@ def build_cones(
         evaluator_kwargs = {"band_frac": band_frac}
         if n_cg is not None:
             evaluator_kwargs["n_cg"] = n_cg
+        # Left unset rather than defaulted here, so the evaluator's own defaults
+        # stay the single source of truth for what an unconfigured call does.
+        if az_engine is not None:
+            evaluator_kwargs["az_engine"] = az_engine
+        if az_solver is not None:
+            evaluator_kwargs["az_solver"] = az_solver
+        if az_ridge is not None:
+            evaluator_kwargs["az_ridge"] = az_ridge
         evaluator = SweepSpectralEvaluator(
             filled, geometry, azimuths, **evaluator_kwargs
         )
