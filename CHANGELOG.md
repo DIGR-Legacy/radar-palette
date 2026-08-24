@@ -8,6 +8,40 @@ git tags via `setuptools-scm`.
 
 ### Added
 
+- `UnphysicalGridWarning` flags gridded fields that leave the range reflectivity can
+  physically take. Measured on the ARM BNF C-SAPR2 volume, settings reachable
+  through the public API and what they produce:
+
+  | setting | grid range (dBZ) | cells beyond ±80 |
+  | --- | --- | --- |
+  | default, `n_cg=12` | −61 … 66 | 0 (but one cone reaches 169) |
+  | `n_cg=25` | **−1907 … 2471** | 1294 |
+  | `n_cg=200` | **−1907 … 2471** | 1294 |
+  | `az_ridge=1e-10` | **−1903 … 2466** | 1292 |
+  | `az_ridge=1e-6` | −98 … 138 | 26 |
+  | `az_ridge=1e-2` | −61 … 58 | 0 |
+  | `az_ridge='auto'` | −61 … 59 | 0 |
+
+  - **`n_cg` is the trap.** It is a long-standing documented argument and raising it
+    looks like asking for a better answer, but the iteration count is acting as
+    regularisation: past roughly a dozen iterations the solve amplifies out-of-band
+    content instead of converging. Its docstring now says so.
+  - **The default is not exempt.** One cone of fifteen reaches 169 dBZ at `n_cg=12`,
+    masked in the final grid only because the vertical interpolation drops it.
+    `az_solver='direct'` with `az_ridge=1e-2` removes it and leaves every other tilt
+    within 1 dB.
+  - Warns rather than raising or clipping: raising would abort a volume for one bad
+    tilt of fifteen, and clipping would hide a settings problem behind a
+    plausible-looking field. Its own category, so a pipeline can
+    `filterwarnings("error", category=UnphysicalGridWarning)`.
+  - A separate, looser check catches large overshoot *inside* the physical range.
+    The threshold (25 dB) sits well above the few dB of Gibbs ringing a band-limited
+    interpolant is expected to produce at a sharp edge — 5.5 dB on this operator's
+    documented example, 13 dB at the steepest tilt of the BNF volume — so it does
+    not fire on every convective case.
+- `grid_volume(..., method="spectral")` now accepts `cg_tol` and `field_units`, which
+  were reachable on `SweepSpectralEvaluator` but not through the public entry point.
+
 - `build_cones(..., n_jobs=...)` and `grid_volume(..., method="spectral", n_jobs=...)`
   grid tilts concurrently. Tilts are independent, so this is the one place in the
   spectral path where hardware helps without changing the algorithm, and on a

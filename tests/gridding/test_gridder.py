@@ -38,6 +38,11 @@ from radar_palette.gridding import (  # noqa: E402
     grid_volume,
     resolve_tilt_workers,
 )
+from radar_palette.gridding.cones import (  # noqa: E402
+    TiltReport,
+    UnphysicalGridWarning,
+    _check_physical,
+)
 
 GRID_SHAPE = (4, 41, 41)
 GRID_LIMITS = ((500.0, 6000.0), (-50_000.0, 50_000.0), (-50_000.0, 50_000.0))
@@ -713,3 +718,183 @@ class TestTheWorkerCountRespectsMemoryAndThreads:
         for bad in (0, -2, -7):
             with pytest.raises(ValueError, match="n_jobs"):
                 resolve_tilt_workers(bad, 15, 20_000.0, 1000.0)
+
+
+class TestUnphysicalOutputIsFlagged:
+    """A gridded reflectivity of 2471 dBZ must not be returned silently.
+
+    Measured on the ARM BNF C-SAPR2 volume this branch was validated against, the
+    grid range for settings reachable through the public API:
+
+    ======================  =====================  ==================
+    setting                 grid range (dBZ)       unphysical cells
+    ======================  =====================  ==================
+    default, ``n_cg=12``    -61 .. 66              0 in the volume, 1 cone at 169
+    ``n_cg=25``             **-1907 .. 2471**      1294
+    ``n_cg=200``            **-1907 .. 2471**      1294
+    ``az_ridge=1e-10``      **-1903 .. 2466**      1292
+    ``az_ridge=1e-6``       -98 .. 138             26
+    ``az_ridge=1e-2``       -61 .. 58              0
+    ``az_ridge='auto'``     -61 .. 59              0
+    ======================  =====================  ==================
+
+    Two things that table says. ``n_cg`` is a long-standing documented argument and
+    raising it *looks* like asking for a better answer, so it is the setting a user
+    is most likely to reach for and least likely to suspect --- past ~12 iterations
+    the solve amplifies out-of-band content instead of converging. And the guard is
+    not hypothetical for the default either: one cone of fifteen reaches 169 dBZ at
+    ``n_cg=12``, masked in the final grid only because the vertical interpolation
+    happens to drop it.
+
+    These tests exercise the check directly rather than through a synthetic volume.
+    Several attempts to provoke divergence synthetically (jittered azimuths, a sharp
+    azimuthal wedge, deliberately tightened ray pairs) all stayed bounded: the real
+    volume's ill-conditioning comes from ray pairs 11x to 300x closer than nominal
+    spacing, and a fixture reproducing that faithfully enough to diverge would be
+    fitting the test to one file. Testing the predicate on constructed reports is
+    both honest about what is verified and sensitive to the thing that matters.
+    """
+
+    @staticmethod
+    def _report(tilt_index=0, grid_min=-60.0, grid_max=60.0, overshoot=0.0):
+        """A TiltReport with only the fields the check reads."""
+        return TiltReport(
+            tilt_index=tilt_index,
+            sweep=tilt_index,
+            fixed_angle=1.5 + tilt_index,
+            sweep_class="SweepClass.NON_UNIFORM",
+            azimuth_path="nufft_kb",
+            nrays=900,
+            masked_input_fraction=0.0,
+            valid_fraction=1.0,
+            height_min_m=500.0,
+            height_max_m=8000.0,
+            data_min_dbz=-80.0,
+            data_max_dbz=62.0,
+            grid_min_dbz=grid_min,
+            grid_max_dbz=grid_max,
+            overshoot_db=overshoot,
+            split_cut_size=1,
+        )
+
+    def test_a_diverged_solve_warns(self):
+        """The measured n_cg=25 case, at the magnitude it actually reached."""
+        reports = [self._report(0), self._report(1, -1907.0, 2471.0, 2409.0)]
+        with pytest.warns(UnphysicalGridWarning, match="physical range"):
+            _check_physical(reports, "dbz")
+
+    def test_a_well_regularised_solve_stays_silent(self):
+        """The guard must not cry wolf.
+
+        A warning on a good run is worse than none: it trains users to filter the
+        category, which removes the protection entirely. These are the measured
+        ranges for ``az_ridge=1e-2`` and ``'auto'``.
+        """
+        reports = [
+            self._report(0, -60.6, 58.4, -5.3),
+            self._report(1, -61.2, 59.0, -5.0),
+        ]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _check_physical(reports, "dbz")
+
+    def test_gibbs_ringing_alone_does_not_warn(self):
+        """A few dB of overshoot at a sharp edge is expected, not a fault.
+
+        The operator's own documentation quotes 5.5 dB on its worked example, and
+        the BNF volume shows 13 dB at its steepest tilt with the default settings.
+        Warning at that level would fire on every convective case.
+        """
+        reports = [self._report(0, -93.1, 61.5, 13.1)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _check_physical(reports, "dbz")
+
+    def test_large_overshoot_inside_the_physical_range_still_warns(self):
+        """The intermediate regime: not yet absurd, no longer just ringing.
+
+        ``az_ridge=1e-6`` reached 138 dBZ on the real volume --- caught by the
+        physical limit --- but a solve can also overshoot by tens of dB while
+        staying inside it, which is already a sign of under-regularisation.
+        """
+        reports = [self._report(0, -70.0, 95.0, 33.0)]
+        with pytest.warns(UnphysicalGridWarning, match="overshoot"):
+            _check_physical(reports, "dbz")
+
+    def test_the_warning_names_the_settings_to_change(self):
+        """A diagnostic a user cannot act on is only half a diagnostic.
+
+        The failure is remote from its cause: the user changed an iteration count or
+        a ridge, and what they see is reflectivity in the thousands. The message
+        must close that gap by naming both knobs and the value to use.
+        """
+        reports = [self._report(0, -1903.0, 2466.0, 2404.0)]
+        with pytest.warns(UnphysicalGridWarning) as caught:
+            _check_physical(reports, "dbz")
+        message = str(caught[0].message)
+        assert "n_cg" in message
+        assert "az_ridge" in message
+        assert "1e-2" in message or "auto" in message
+
+    def test_it_reports_how_many_tilts_and_which_is_worst(self):
+        """Fifteen cones, and the user needs to know it was three of them."""
+        reports = [
+            self._report(0),
+            self._report(1, -500.0, 700.0, 640.0),
+            self._report(2, -1907.0, 2471.0, 2409.0),
+        ]
+        with pytest.warns(UnphysicalGridWarning) as caught:
+            _check_physical(reports, "dbz")
+        message = str(caught[0].message)
+        assert "2 of 3" in message
+        assert "tilt 2" in message
+
+    def test_it_can_be_escalated_to_an_error(self):
+        """Its own category, so a production pipeline can refuse to proceed.
+
+        The right posture differs by context --- interactive work wants to see both
+        the field and the warning, an operational run wants to stop --- so the
+        category exists to let the caller choose rather than being decided here.
+        """
+        reports = [self._report(0, -1907.0, 2471.0, 2409.0)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", category=UnphysicalGridWarning)
+            with pytest.raises(UnphysicalGridWarning):
+                _check_physical(reports, "dbz")
+
+    @pytest.mark.parametrize("units", ("linear_z", "other"))
+    def test_a_non_reflectivity_field_is_not_checked(self, units):
+        """DBZ limits are meaningless for velocity, or for linear Z."""
+        reports = [self._report(0, -1907.0, 2471.0, 2409.0)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _check_physical(reports, units)
+
+    def test_the_check_is_wired_into_build_cones(self, volume, monkeypatch):
+        """End to end, so the predicate is actually consulted.
+
+        A correct check that ``build_cones`` never calls would pass every unit test
+        above --- and did: cutting the call site was the one seeded fault the first
+        version of this class failed to catch, because the synthetic fixture never
+        trips the guard and so a silent guard looks identical to a happy one.
+        Asserting the call happens, with the reports and units it should receive, is
+        what closes that hole.
+        """
+        seen = {}
+
+        def spy(reports, field_units):
+            seen["n_reports"] = len(reports)
+            seen["field_units"] = field_units
+
+        monkeypatch.setattr("radar_palette.gridding.cones._check_physical", spy)
+        shape, limits = (7, 21, 21), ((500.0, 6500.0), (-20e3, 20e3), (-20e3, 20e3))
+        grid_volume(volume, grid_shape=shape, grid_limits=limits, method="spectral")
+        assert seen["n_reports"] == volume.nsweeps
+        assert seen["field_units"] is None
+
+    def test_a_clean_grid_call_raises_no_warning(self, volume):
+        """And the wired-in check stays quiet on a well-behaved volume."""
+        shape, limits = (7, 21, 21), ((500.0, 6500.0), (-20e3, 20e3), (-20e3, 20e3))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", category=UnphysicalGridWarning)
+            grid_volume(volume, grid_shape=shape, grid_limits=limits, method="spectral")

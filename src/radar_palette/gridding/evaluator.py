@@ -208,6 +208,16 @@ class SweepSpectralEvaluator:
         ``DEFAULT_CG_ITERATIONS``; pass 0 for classical gridding only. See the module
         docstring for why the default is not 0. Ignored when ``az_solver='direct'``,
         which has no iteration count.
+
+        **Do not raise this to get a better answer.** The iteration count is acting
+        as regularisation, not as a convergence budget: on a real convective volume
+        the gridded field spans -61 to 66 dBZ at the default 12 iterations and
+        **-1907 to 2471 dBZ at 25**, because past roughly a dozen iterations the
+        solve amplifies out-of-band content instead of converging. If the answer is
+        not good enough, use ``az_solver='direct'``, which reaches the least-squares
+        limit in one factorisation with an explicit regularisation term. Unphysical
+        output is flagged with
+        :class:`~radar_palette.gridding.cones.UnphysicalGridWarning`.
     cg_tol : float, optional
         Relative residual at which the refinement stops early.
     az_engine : str, optional

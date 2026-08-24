@@ -71,8 +71,10 @@ from radar_palette.gridding.census import (
     census_sweep,
 )
 from radar_palette.gridding.cones import (
+    PHYSICAL_DBZ_LIMITS,
     ConeStack,
     TiltReport,
+    UnphysicalGridWarning,
     beam_footprint_crossover,
     build_cones,
     cone_range_height,
@@ -152,6 +154,8 @@ __all__ = [
     "EngineUnavailableError",
     "available_engines",
     "make_operator",
+    "PHYSICAL_DBZ_LIMITS",
+    "UnphysicalGridWarning",
     "resolve_tilt_workers",
     "EARTH_RADIUS_EFFECTIVE_M",
     "EvalReport",

@@ -145,6 +145,7 @@ def _grid_spectrally(
     scheme=DEFAULT_VERTICAL_SCHEME,
     band_frac=1.0,
     n_cg=None,
+    cg_tol=None,
     az_engine=None,
     az_solver=None,
     az_ridge=None,
@@ -152,6 +153,7 @@ def _grid_spectrally(
     up_az=4,
     up_r=4,
     n_jobs=None,
+    field_units=None,
 ):
     """Grid one volume by per-sweep spectral evaluation plus vertical interpolation."""
     import pyart
@@ -184,6 +186,7 @@ def _grid_spectrally(
         field_name=field_name,
         band_frac=band_frac,
         n_cg=n_cg,
+        cg_tol=cg_tol,
         az_engine=az_engine,
         az_solver=az_solver,
         az_ridge=az_ridge,
@@ -191,6 +194,7 @@ def _grid_spectrally(
         up_az=up_az,
         up_r=up_r,
         n_jobs=n_jobs,
+        field_units=field_units,
     )
 
     east_axis_m = np.linspace(x_min, x_max, n_east)
@@ -340,9 +344,9 @@ def grid_volume(
         docstring for the trade-off, which is a real one in both directions.
     **gridding_kwargs
         Passed to the chosen backing. For ``"spectral"`` these are ``field_name``,
-        ``scheme``, ``band_frac``, ``n_cg``, ``az_engine``, ``az_solver``,
-        ``az_ridge``, ``fill_method``, ``up_az``, ``up_r`` and ``n_jobs``. The
-        three ``az_*``
+        ``scheme``, ``band_frac``, ``n_cg``, ``cg_tol``, ``az_engine``, ``az_solver``,
+        ``az_ridge``, ``fill_method``, ``up_az``, ``up_r``, ``n_jobs`` and
+        ``field_units``. The three ``az_*``
         arguments choose the azimuth NUFFT backend and the solve on top of it
         (:mod:`radar_palette.gridding.nufft_engines`); they matter here because
         the spectral cost is dominated by building one evaluator per sweep, so it

@@ -270,6 +270,99 @@ TILT_BYTES_PER_CELL = 1400.0
 MEMORY_HEADROOM_FRAC = 0.5
 
 
+# Beyond this the gridded field is not a plausible reflectivity, whatever the
+# operator did to get there. Hail spikes and three-body scatter reach the high 70s;
+# nothing meteorological approaches 100 dBZ, and the receiver noise floor bounds the
+# low side well above -100. Used only to decide whether to WARN -- the values are
+# left in place, because silently clipping would hide a settings problem behind a
+# plausible-looking field.
+class UnphysicalGridWarning(UserWarning):
+    """The gridded field left the range its physical quantity can take.
+
+    Its own category rather than a bare ``UserWarning`` so a caller can act on it
+    programmatically --- ``filterwarnings("error", category=UnphysicalGridWarning)``
+    turns it into a hard failure for a production pipeline, which is the right
+    posture there and the wrong one for interactive work.
+    """
+
+
+PHYSICAL_DBZ_LIMITS = (-100.0, 100.0)
+
+# Overshoot beyond the input range that is worth flagging even when the result is
+# still inside PHYSICAL_DBZ_LIMITS. A band-limited interpolant is EXPECTED to
+# overshoot at a sharp edge -- that is Gibbs behaviour, not a bug -- so this sits
+# well above the few dB such ringing produces (measured: 5.5 dB on this operator's
+# documented example, 7.5 dB at n_cg=12 on a convective volume) and catches the
+# regime where the solve has started to diverge instead.
+OVERSHOOT_WARN_DB = 25.0
+
+
+def _check_physical(reports, field_units):
+    """Warn when a gridded tilt leaves the range reflectivity can physically take.
+
+    Called after gridding rather than before, because the failure this catches
+    happens *between* the measured rays: every ray position can be fine and the
+    interpolant between them still diverge. A check on inputs cannot see it, and
+    the per-tilt ``overshoot_db`` already computed is exactly the quantity that
+    can.
+
+    Warns rather than raising or clipping, and that choice is deliberate. Raising
+    would abort a volume for one bad tilt out of fifteen; clipping would hide a
+    settings problem behind a field that looks plausible. A scientist who sees
+    2471 dBZ knows something is wrong with the run --- one who sees a silently
+    clipped 100 dBZ does not.
+
+    Parameters
+    ----------
+    reports : list of TiltReport
+        Per-tilt diagnostics, already carrying ``overshoot_db`` and the grid range.
+    field_units : {'dbz', 'linear_z', 'other'} or None
+        Only ``'dbz'`` (or ``None``, which the evaluator resolves to dBZ for
+        reflectivity-like input) has physical limits worth asserting. Any other
+        field passes through unchecked.
+    """
+    if field_units not in (None, "dbz"):
+        return
+
+    low, high = PHYSICAL_DBZ_LIMITS
+    unphysical = [
+        report
+        for report in reports
+        if report.grid_min_dbz < low or report.grid_max_dbz > high
+    ]
+    if unphysical:
+        worst = max(unphysical, key=lambda r: max(abs(r.grid_min_dbz), r.grid_max_dbz))
+        warnings.warn(
+            f"{len(unphysical)} of {len(reports)} gridded tilts left the physical "
+            f"range for reflectivity ({low:.0f} to {high:.0f} dBZ): worst is tilt "
+            f"{worst.tilt_index} at {worst.fixed_angle:.1f} deg, spanning "
+            f"{worst.grid_min_dbz:.0f} to {worst.grid_max_dbz:.0f} dBZ from input "
+            f"data spanning {worst.data_min_dbz:.0f} to {worst.data_max_dbz:.0f}. "
+            f"The azimuth solve has diverged rather than merely ringing. If you "
+            f"raised n_cg, lower it -- past ~12 iterations the solve amplifies "
+            f"out-of-band noise instead of converging. If you set az_ridge, it is "
+            f"too small for real reflectivity; use 1e-2 or 'auto'. Values are left "
+            f"unclipped so the problem stays visible.",
+            UnphysicalGridWarning,
+            stacklevel=4,
+        )
+        return
+
+    ringing = [r for r in reports if r.overshoot_db > OVERSHOOT_WARN_DB]
+    if ringing:
+        worst = max(ringing, key=lambda r: r.overshoot_db)
+        warnings.warn(
+            f"{len(ringing)} of {len(reports)} gridded tilts overshoot their input "
+            f"range by more than {OVERSHOOT_WARN_DB:.0f} dB: worst is tilt "
+            f"{worst.tilt_index} at {worst.fixed_angle:.1f} deg, by "
+            f"{worst.overshoot_db:.0f} dB. A band-limited interpolant overshoots at "
+            f"a sharp edge by a few dB, which is expected; this is larger than that "
+            f"and suggests the azimuth solve is under-regularised.",
+            UnphysicalGridWarning,
+            stacklevel=4,
+        )
+
+
 @contextlib.contextmanager
 def _limited_threads(n_threads):
     """Cap the native BLAS/FFT thread pools for the duration of the block.
@@ -421,6 +514,7 @@ def build_cones(
     field_name="reflectivity",
     band_frac=1.0,
     n_cg=None,
+    cg_tol=None,
     az_engine=None,
     az_solver=None,
     az_ridge=None,
@@ -428,6 +522,7 @@ def build_cones(
     up_az=4,
     up_r=4,
     n_jobs=None,
+    field_units=None,
 ):
     """Spectrally grid every sweep onto one shared horizontal lattice.
 
@@ -450,7 +545,7 @@ def build_cones(
         of truth. These are the consequential arguments for spectral gridding
         cost: one evaluator is built per sweep and that build dominates, so the
         total is nearly flat in output resolution and is set here.
-    band_frac, n_cg : optional
+    band_frac, n_cg, cg_tol : optional
         Passed to :class:`~radar_palette.gridding.SweepSpectralEvaluator`. ``n_cg``
         defaults to the evaluator's own default.
     fill_method : str, optional
@@ -481,6 +576,8 @@ def build_cones(
     evaluator_kwargs = {"band_frac": band_frac}
     if n_cg is not None:
         evaluator_kwargs["n_cg"] = n_cg
+    if cg_tol is not None:
+        evaluator_kwargs["cg_tol"] = cg_tol
     # Left unset rather than defaulted here, so the evaluator's own defaults stay
     # the single source of truth for what an unconfigured call does.
     if az_engine is not None:
@@ -569,6 +666,8 @@ def build_cones(
         with _limited_threads(blas_threads):
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 results = list(pool.map(grid_one_tilt, indexed))
+
+    _check_physical([entry[3] for entry in results], field_units)
 
     cones = [entry[0] for entry in results]
     heights = [entry[1] for entry in results]
