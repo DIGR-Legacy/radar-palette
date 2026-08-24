@@ -24,8 +24,8 @@ Engines
     No interpolation kernel at all: the DFT matrix, formed explicitly. Sounds
     wasteful and is not, because on the azimuth axis the matrix is
     ``n_rays x n_modes`` and both are ray counts --- 8 MB at 720 rays. Exact to
-    round-off, and the fastest engine here below ~720 rays. **No new
-    dependencies.**
+    round-off, and the fastest engine measured on the 360-720 ray shapes
+    (``finufft`` wins at both ends of the range). **No new dependencies.**
 ``scipy``
     The reference algorithm with two mechanical substitutions: the spreading
     stencil becomes one CSR sparse matrix (replacing ``numpy.add.at``, which is an
@@ -86,9 +86,26 @@ dense        1.8x        **32.7x**
 finufft      1.2x        29.2x
 ===========  ==========  ==============
 
-Choosing a faster engine buys about 2x; changing the solver buys 10-30x. Past
-~1440 rays ``finufft`` overtakes ``dense`` (33x against 22x), which is the
-``O(n log n)`` versus ``O(n^2)`` crossover; radar azimuth normally sits below it.
+Choosing a faster engine buys about 2x; changing the solver buys 10-30x.
+
+Which engine leads is **not** monotone in ray count, so pick by measurement
+rather than by asymptotics. Direct-solver speedups across the tested shapes:
+
+============  ========  =========  =========
+sweep         scipy     dense      finufft
+============  ========  =========  =========
+120 x 34      1.2x      18.8x      **22.5x**
+360 x 500     6.7x      **35.3x**  18.5x
+360 x 1832    14.9x     **44.0x**  17.4x
+720 x 1200    13.8x     **32.2x**  30.7x
+1440 x 1832   16.1x     21.5x      **32.7x**
+============  ========  =========  =========
+
+``dense`` leads the middle band (360-720 rays) and ``finufft`` leads at both
+ends --- at 1440 rays for the ``O(n log n)`` versus ``O(n^2)`` reason, and at
+120 rays for the opposite one: the problem is so small that the dense engine's
+per-solve BLAS work no longer amortises the matrix it built. Operational
+1-degree and 0.5-degree volumes sit in the band where ``dense`` wins.
 
 **The accuracy it buys depends on the engine, and the distinction is the whole
 point.** Measured on a field *exactly* band-limited on the lattice, so the
@@ -701,10 +718,13 @@ class _DenseEngine(_EngineBase):
     parameter --- ``forward`` is the trig polynomial evaluated exactly, to
     round-off. Combined with the ``direct`` solver it recovers a band-limited
     field to ~1e-10 (the ridge, not the arithmetic), against ~3e-4 for the
-    Kaiser-Bessel engines, and it is the fastest engine here up to about 720 rays.
-    Beyond ~1440 rays the ``O(n_rays * n_modes)`` product loses to ``finufft``'s
-    ``O(n log n)``, which is the crossover the NUFFT literature is written about;
-    radar azimuth sits well below it.
+    Kaiser-Bessel engines, and it is the fastest engine measured on sweeps of
+    360-720 rays. It does **not** win everywhere: ``finufft`` is faster at both
+    ends of the tested range --- at 1440 rays because ``O(n_rays * n_modes)``
+    loses to ``O(n log n)`` (the crossover the NUFFT literature is written
+    about), and at 120 rays because the problem is too small for the dense
+    per-solve BLAS work to amortise the matrix. See the table in the module
+    docstring; measure rather than extrapolate.
 
     Memory is the reason this is not the default: the matrix is
     ``16 * n_rays * n_modes`` bytes (33 MB at 1440 rays, 133 MB at 2880), where

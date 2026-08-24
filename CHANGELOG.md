@@ -29,8 +29,12 @@ git tags via `setuptools-scm`.
     matrix. That is affordable here, and only here, because on the azimuth axis
     the matrix is `n_rays x n_modes` and both are ray counts (8 MB at 720 rays).
     It is therefore exact to round-off, needs no dependency, and is the fastest
-    engine below ~720 rays; `finufft` overtakes it past ~1440, which is the
-    `O(n log n)` versus `O(n^2)` crossover.
+    engine measured on 360-720 ray sweeps (35-44x with the direct solver). Which
+    engine leads is *not* monotone in ray count: `finufft` is faster at both ends
+    of the tested range — at 1440 rays for the `O(n log n)` versus `O(n^2)`
+    reason, and at 120 rays because the problem is too small for the dense
+    per-solve BLAS work to amortise the matrix it built. Operational 1° and 0.5°
+    volumes sit in the band where `dense` wins; measure rather than extrapolate.
   - `solver='direct'` factorises the normal equations instead of iterating on
     them, reaching the least-squares solution CG approaches (verified against
     CG run to 1e-14). It is 10-30x faster than 12 CG iterations, against about 2x
