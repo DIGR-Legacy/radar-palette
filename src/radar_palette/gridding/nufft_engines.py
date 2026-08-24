@@ -251,8 +251,8 @@ DEFAULT_SOLVER = "cg"
 # data gave an answer eight orders of magnitude too small.
 #
 # And the honest headline: with a well-chosen ridge the direct solve is
-# COMPARABLE to CG on real data, not better -- it wins on SPOL and SWX by ~0.15
-# dB and loses on CSAPR2 by ~0.05 dB. The ~1e-10 recovery it achieves on
+# COMPARABLE to CG on real data, not orders better -- it wins on SPOL by 1.10 dB
+# and on SWX by 0.13 dB, and loses on CSAPR2 by 0.05 dB. The ~1e-10 recovery on
 # synthetic band-limited fields does not transfer, because that accuracy was
 # against a truth this operator can represent exactly and real reflectivity is
 # not such a field. The direct solve's remaining advantage on real data is
