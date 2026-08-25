@@ -129,7 +129,7 @@ commits after it carry a `setuptools-scm`-derived development version.
 
 ## Conventions
 
-Two that are load-bearing and easy to get wrong:
+Two that are load-bearing and easy to get wrong, so please note:
 
 - **Reflectivity is interpolated in dBZ, not linear Z.** Band-limited
   interpolation in linear Z produces large negative excursions on real sweeps.
