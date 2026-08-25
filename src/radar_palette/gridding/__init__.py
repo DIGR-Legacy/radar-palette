@@ -11,7 +11,11 @@ band-limited resampling operator rather than a local weighted average:
    statistics the choice of operator depends on.
 2. **Horizontal operator** resamples each tilt with an exact Fourier series
    where the census permits it, and a non-uniform FFT (Kaiser-Bessel
-   gridding kernel) otherwise.
+   gridding kernel) otherwise. The non-uniform transforms and the solve on
+   top of them are each pluggable --- see
+   :mod:`radar_palette.gridding.nufft_engines` and the evaluator's
+   ``az_engine`` / ``az_solver`` arguments. The defaults need no optional
+   dependency and reproduce :mod:`radar_palette.gridding.nufft` to round-off.
 3. **Vertical operator** combines tilts in elevation.  This is *not*
    spectral: tilt spacing is coarse, non-uniform and non-periodic, so a
    spectral operator in elevation is not defensible.
@@ -67,12 +71,16 @@ from radar_palette.gridding.census import (
     census_sweep,
 )
 from radar_palette.gridding.cones import (
+    PHYSICAL_DBZ_LIMITS,
     ConeStack,
+    EngineConcurrencyWarning,
     TiltReport,
+    UnphysicalGridWarning,
     beam_footprint_crossover,
     build_cones,
     cone_range_height,
     dedup_sweeps,
+    resolve_tilt_workers,
     target_lattice,
 )
 from radar_palette.gridding.evaluator import (
@@ -90,6 +98,16 @@ from radar_palette.gridding.gridder import (
     DEFAULT_GRIDDING_METHOD,
     GRIDDING_METHODS,
     grid_volume,
+)
+from radar_palette.gridding.nufft_engines import (
+    DEFAULT_ENGINE,
+    DEFAULT_RIDGE,
+    DEFAULT_SOLVER,
+    ENGINES,
+    SOLVERS,
+    EngineUnavailableError,
+    available_engines,
+    make_operator,
 )
 from radar_palette.gridding.reflectivity import (
     DBZ_PHYSICAL_CEILING,
@@ -128,7 +146,19 @@ __all__ = [
     "AZ_DEV_TOL_FRAC",
     "DBZ_PHYSICAL_CEILING",
     "DEFAULT_CG_ITERATIONS",
+    "DEFAULT_ENGINE",
+    "DEFAULT_RIDGE",
+    "DEFAULT_SOLVER",
     "DR_DEV_TOL_FRAC",
+    "ENGINES",
+    "SOLVERS",
+    "EngineUnavailableError",
+    "available_engines",
+    "make_operator",
+    "EngineConcurrencyWarning",
+    "PHYSICAL_DBZ_LIMITS",
+    "UnphysicalGridWarning",
+    "resolve_tilt_workers",
     "EARTH_RADIUS_EFFECTIVE_M",
     "EvalReport",
     "LinearReflectivityError",

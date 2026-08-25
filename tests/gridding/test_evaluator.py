@@ -460,20 +460,27 @@ class TestNonUniformPath:
     def test_unrefined_gridding_is_much_worse(self, jittered):
         """Quantifies what the default buys: ~30% error becomes <1%.
 
-        This is why ``DEFAULT_CG_ITERATIONS`` is not 0. Gridding computes the
-        adjoint, and the adjoint is not the inverse.
+        This is why ``DEFAULT_CG_ITERATIONS`` is not 0 on the iterative path.
+        Gridding computes the adjoint, and the adjoint is not the inverse. The direct
+        solver reaches the same place by factorisation instead, which is why it needs
+        no iteration count --- so ``az_solver='cg'`` is pinned here to keep this test
+        about the iteration.
         """
         geometry, azimuths, values, ngates = jittered
         gate_ranges = RANGE_FIRST_M + RANGE_SPACING_M * np.arange(ngates)
         azimuth_mesh, range_mesh = np.meshgrid(azimuths, gate_ranges, indexing="ij")
-        unrefined = SweepSpectralEvaluator(values, geometry, azimuths, n_cg=0)
+        unrefined = SweepSpectralEvaluator(
+            values, geometry, azimuths, n_cg=0, az_solver="cg"
+        )
         error = np.max(np.abs(unrefined.evaluate(range_mesh, azimuth_mesh) - values))
         assert error > 0.1 * np.ptp(values)
 
     def test_conjugate_gradient_refinement_reduces_the_residual(self, jittered):
         """Gridding is the adjoint, not the inverse; CG closes that gap."""
         geometry, azimuths, values, _ = jittered
-        refined = SweepSpectralEvaluator(values, geometry, azimuths, n_cg=12)
+        refined = SweepSpectralEvaluator(
+            values, geometry, azimuths, n_cg=12, az_solver="cg"
+        )
         assert (
             refined.report.extras["cg_resid_end"]
             < refined.report.extras["cg_resid_start"]
@@ -483,19 +490,50 @@ class TestNonUniformPath:
         geometry, azimuths, values, ngates = jittered
         gate_ranges = RANGE_FIRST_M + RANGE_SPACING_M * np.arange(ngates)
         azimuth_mesh, range_mesh = np.meshgrid(azimuths, gate_ranges, indexing="ij")
-        plain = SweepSpectralEvaluator(values, geometry, azimuths, n_cg=0)
-        refined = SweepSpectralEvaluator(values, geometry, azimuths, n_cg=25)
+        # az_solver='cg' is pinned because this test is *about* the iteration: the
+        # default solver ignores n_cg, so without this both arms would be the
+        # direct solve and the comparison would be vacuous.
+        plain = SweepSpectralEvaluator(
+            values, geometry, azimuths, n_cg=0, az_solver="cg"
+        )
+        refined = SweepSpectralEvaluator(
+            values, geometry, azimuths, n_cg=25, az_solver="cg"
+        )
         plain_error = np.max(np.abs(plain.evaluate(range_mesh, azimuth_mesh) - values))
         refined_error = np.max(
             np.abs(refined.evaluate(range_mesh, azimuth_mesh) - values)
         )
         assert refined_error < plain_error
 
-    def test_refinement_is_on_by_default(self, jittered):
+    def test_the_default_solve_is_direct_not_iterative(self, jittered):
+        """The default changed, and this pins what it changed to.
+
+        Refinement-by-iteration is no longer the default: ``n_cg=12`` produced
+        unphysical reflectivity on real volumes, because the iteration count was
+        acting as regularisation rather than as a convergence budget. The default is
+        now a factorisation with an explicit ridge, so there is no iteration count to
+        report and no ``cg_resid_*`` pair.
+        """
         geometry, azimuths, values, _ = jittered
-        evaluator = SweepSpectralEvaluator(values, geometry, azimuths)
-        assert evaluator.report.extras["n_cg"] == DEFAULT_CG_ITERATIONS
-        assert evaluator.report.extras["cg_resid_end"] < 1e-3
+        extras = SweepSpectralEvaluator(values, geometry, azimuths).report.extras
+        assert extras["solver"] == "direct"
+        assert extras["n_cg"] == 0
+        assert "cg_resid_end" not in extras
+        assert extras["ridge_mode"] == "auto"
+        assert extras["normal_cond"] > 1.0
+
+    def test_the_iterative_solve_is_still_reachable_and_unchanged(self, jittered):
+        """Opting back in must reproduce the old default exactly, diagnostics included.
+
+        The point of changing a default rather than removing a code path: anyone
+        reproducing earlier numbers needs the old behaviour available and identical.
+        """
+        geometry, azimuths, values, _ = jittered
+        extras = SweepSpectralEvaluator(
+            values, geometry, azimuths, az_solver="cg", az_engine="scipy"
+        ).report.extras
+        assert extras["n_cg"] == DEFAULT_CG_ITERATIONS
+        assert extras["cg_resid_end"] < 1e-3
 
     def test_refinement_can_be_disabled(self, jittered):
         geometry, azimuths, values, _ = jittered
@@ -511,13 +549,22 @@ class TestNonUniformPath:
 
     def test_kernel_parameters_are_reported(self, jittered):
         geometry, azimuths, values, _ = jittered
-        evaluator = SweepSpectralEvaluator(values, geometry, azimuths)
+        # az_engine='scipy' is pinned deliberately: these keys describe a
+        # Kaiser-Bessel kernel and an oversampled work grid, and the default engine
+        # has neither -- it forms the exact DFT matrix. Reporting a kb_beta for an
+        # engine with no KB kernel would be a fiction, so the key set is
+        # engine-dependent by design.
+        evaluator = SweepSpectralEvaluator(
+            values, geometry, azimuths, az_engine="scipy"
+        )
         for key in ("kb_width", "oversamp", "kb_beta", "n_nominal", "M_oversampled"):
             assert key in evaluator.report.extras
 
     def test_oversampled_lattice_is_larger_than_nominal(self, jittered):
         geometry, azimuths, values, _ = jittered
-        extras = SweepSpectralEvaluator(values, geometry, azimuths).report.extras
+        extras = SweepSpectralEvaluator(
+            values, geometry, azimuths, az_engine="scipy"
+        ).report.extras
         assert extras["M_oversampled"] >= 2 * extras["n_nominal"]
 
     def test_constant_field_survives_non_uniform_sampling(self, jittered):
@@ -539,7 +586,9 @@ class TestNonUniformPath:
         """Documents the failure mode the default exists to avoid."""
         geometry, azimuths, _, ngates = jittered
         constant = np.full((azimuths.size, ngates), 12.5)
-        unrefined = SweepSpectralEvaluator(constant, geometry, azimuths, n_cg=0)
+        unrefined = SweepSpectralEvaluator(
+            constant, geometry, azimuths, n_cg=0, az_solver="cg"
+        )
         probes = np.linspace(0.0, 359.0, 41)
         result = unrefined.evaluate(
             np.full_like(probes, RANGE_FIRST_M + RANGE_SPACING_M * 5.0), probes

@@ -176,10 +176,47 @@ def _wrapped_azimuth_differences(azimuths_deg):
     return (differences + 180.0) % 360.0 - 180.0
 
 
+#: Fields preferred, in order, when no ``valid_field`` is named. Every entry reaches
+#: the full surveillance range on a WSR-88D split cut, unlike the Doppler moments.
+VALID_FIELD_PREFERENCE = (
+    "reflectivity",
+    "DBZH",
+    "corrected_reflectivity",
+    "reflectivity_horizontal",
+    "total_power",
+)
+
+
+def _pick_valid_field(radar):
+    """Choose which field measures a sweep's usable range, deterministically.
+
+    This is not a cosmetic tidy-up. ``next(iter(radar.fields))`` picks whichever key
+    the dict happens to yield first, and Py-ART builds that dict from a set, so under
+    hash randomisation the winner differs *between processes* for a byte-identical
+    file. On a NEXRAD split cut the choice matters enormously: ``reflectivity``
+    reaches ~460 km while ``velocity`` stops at ~2 km, so ``range_max_valid_m`` and
+    therefore :func:`~radar_palette.gridding.cones.dedup_sweeps` flip between the
+    surveillance and Doppler member of the same elevation. Measured on a KLOT VCP-212
+    volume with six SAILS repeats at 0.48 deg, that made the gridded peak alternate
+    between 67.6 and 86.9 dBZ across identical runs.
+
+    A reflectivity-like field is preferred because it is the one that spans the full
+    surveillance sweep; failing that, the alphabetically first field name is used, so
+    the answer still does not depend on dict ordering.
+    """
+    fields = getattr(radar, "fields", None)
+    if not fields:
+        return None
+    for name in VALID_FIELD_PREFERENCE:
+        if name in fields:
+            return name
+    return sorted(fields)[0]
+
+
 def _count_valid_gates(radar, sweep_slice, valid_field):
     """Count gates up to the last one carrying unmasked data in this sweep."""
     if valid_field is None:
-        valid_field = next(iter(radar.fields), None)
+        valid_field = _pick_valid_field(radar)
     if valid_field is None:
         return None
 

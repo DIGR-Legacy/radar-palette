@@ -6,7 +6,263 @@ git tags via `setuptools-scm`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Split-cut selection was not reproducible across processes.** `census_sweep` fell
+  back to `next(iter(radar.fields))` when no `valid_field` was named, and Py-ART builds
+  its field dict from a set, so under hash randomisation the first key differs between
+  runs of the same file. On a NEXRAD split cut the choice decides everything:
+  `reflectivity` reaches ~460 km while `velocity` stops at ~2 km, so
+  `range_max_valid_m` flipped and `dedup_sweeps` kept the Doppler member instead of
+  the surveillance one. Measured on a KLOT VCP-212 volume with six SAILS repeats at
+  0.48 deg, the gridded peak alternated between 67.6 and 86.9 dBZ across identical
+  runs -- 9 of 20 fresh processes took the wrong sweep. Now resolved through
+  `VALID_FIELD_PREFERENCE`, a reflectivity-first list with a sorted fallback, so the
+  answer never depends on dict ordering. Nine consecutive fresh processes now agree
+  bit-for-bit where before they did not.
+
+  This did not affect the C-SAPR2 results in this changelog: that scan strategy has no
+  split cuts, so every elevation has exactly one member and the group has nothing to
+  choose between.
+
 ### Changed
+
+- **The spectral azimuth path now defaults to `az_engine='dense'`, `az_solver='direct'`.**
+  This changes numbers for existing callers, and it is a safety decision rather than a
+  performance one: the numbers it changes were partly wrong. Measured per cone on a
+  15-tilt ARM C-SAPR2 volume, the old `scipy`/`cg` default at `n_cg=12` had one tilt of
+  fifteen overshooting its input range by 107 dB and reaching 169 dBZ, and across a
+  resolution ramp the whole-volume range reached −299…297 dBZ. The new default holds
+  −99…66 dBZ on the same grids, with the other fourteen tilts within 1 dB.
+  - `n_cg` was acting as regularisation, not as a convergence budget, so a caller
+    raising it to improve the answer made it catastrophically worse (25 iterations:
+    −1907…2471 dBZ). The direct solver takes an explicit ridge instead.
+  - `dense` needs no dependency beyond numpy/scipy: on the azimuth axis the DFT matrix
+    is `n_rays × n_modes` and both are ray counts, so forming it exactly costs 8 MB at
+    720 rays and removes the Kaiser-Bessel kernel error.
+  - `az_engine='scipy', az_solver='cg'` reproduces the previous behaviour exactly,
+    `cg_resid_*` diagnostics included.
+
+### Added
+
+- `EngineConcurrencyWarning` when `az_engine='finufft'` is combined with `n_jobs>1`.
+  finufft's results there are exact — bit-identical to `dense` on every grid measured
+  — but its timing is not reproducible. Measured across eight sweep shapes, three
+  repeats each:
+  - **Serially it is indistinguishable from `dense`** (medians 0.97–1.00 of `dense`,
+    1.00–1.03x spread). An earlier note in this branch claiming it was ~1.9x slower
+    was comparing serial finufft against *parallel* `dense`; that was wrong.
+  - Under `n_jobs=4` it is bimodal: on six of eight shapes it is the **fastest CPU
+    configuration measured** (~8.3 s against `dense`'s ~10.1 s on a 15-tilt volume),
+    and on the rest the same call takes 12–19x longer. Best and worst single runs
+    across the study were 7.9 s and 177.8 s at fixed workload, against `dense`'s
+    10.0–11.9 s over the same 24 runs.
+  - Because it varies run to run at fixed workload, and not only on the first run,
+    this is a race in finufft's own global planner state, not warm-up or a workload
+    effect. Warned rather than serialised or removed: it may well be the fastest
+    choice, the numbers are right either way, and quietly forcing `n_jobs=1` for one
+    engine would make an engine comparison unfair.
+
+- Measured the `torch` engine's GPU path, previously documented but never run.
+  On an NVIDIA A10 (via Modal), per-tilt azimuth solves took 93.3 ms in float64 and
+  91.3 ms in float32 against 83.9 ms on the same machine's CPU — **slower on 15 of 15
+  tilts in both precisions**. A 931 x 1050 solve is a few tens of milliseconds of
+  arithmetic, too small to amortise host-to-device transfer and kernel launch; this is
+  the same size argument that makes the dependency-free `dense` engine competitive on
+  this axis. Accuracy on the device is sound if anyone wants it regardless: float64
+  matches CPU to 1e-15, and float32 is only 1.5x worse (3.3e-4), because the
+  Kaiser-Bessel kernel error dominates round-off either way. `device='cuda'`/`'mps'`
+  remain available and are now documented as measured-and-slower rather than untested.
+
+- `az_engine='torch'` accepts a `dtype` argument. It was hardcoded to `complex128`,
+  so the single-precision path a GPU is actually fast at could not be expressed.
+
+- `UnphysicalGridWarning` flags gridded fields that leave the range reflectivity can
+  physically take. Measured on the ARM BNF C-SAPR2 volume, settings reachable
+  through the public API and what they produce:
+
+  | setting | grid range (dBZ) | cells beyond ±80 |
+  | --- | --- | --- |
+  | default, `n_cg=12` | −61 … 66 | 0 (but one cone reaches 169) |
+  | `n_cg=25` | **−1907 … 2471** | 1294 |
+  | `n_cg=200` | **−1907 … 2471** | 1294 |
+  | `az_ridge=1e-10` | **−1903 … 2466** | 1292 |
+  | `az_ridge=1e-6` | −98 … 138 | 26 |
+  | `az_ridge=1e-2` | −61 … 58 | 0 |
+  | `az_ridge='auto'` | −61 … 59 | 0 |
+
+  - **`n_cg` is the trap.** It is a long-standing documented argument and raising it
+    looks like asking for a better answer, but the iteration count is acting as
+    regularisation: past roughly a dozen iterations the solve amplifies out-of-band
+    content instead of converging. Its docstring now says so.
+  - **The default is not exempt.** One cone of fifteen reaches 169 dBZ at `n_cg=12`,
+    masked in the final grid only because the vertical interpolation drops it.
+    `az_solver='direct'` with `az_ridge=1e-2` removes it and leaves every other tilt
+    within 1 dB.
+  - Warns rather than raising or clipping: raising would abort a volume for one bad
+    tilt of fifteen, and clipping would hide a settings problem behind a
+    plausible-looking field. Its own category, so a pipeline can
+    `filterwarnings("error", category=UnphysicalGridWarning)`.
+  - A separate, looser check catches large overshoot *inside* the physical range.
+    The threshold (25 dB) sits well above the few dB of Gibbs ringing a band-limited
+    interpolant is expected to produce at a sharp edge — 5.5 dB on this operator's
+    documented example, 13 dB at the steepest tilt of the BNF volume — so it does
+    not fire on every convective case.
+- `grid_volume(..., method="spectral")` now accepts `cg_tol` and `field_units`, which
+  were reachable on `SweepSpectralEvaluator` but not through the public entry point.
+
+- `build_cones(..., n_jobs=...)` and `grid_volume(..., method="spectral", n_jobs=...)`
+  grid tilts concurrently. Tilts are independent, so this is the one place in the
+  spectral path where hardware helps without changing the algorithm, and on a
+  15-tilt volume the serial loop left most of a 14-core machine idle.
+  - **Threads, not processes.** The per-tilt cost is NumPy/SciPy linear algebra and
+    FFTs, which release the GIL; a process pool would pickle the radar object to
+    every worker, hundreds of megabytes for a research volume.
+  - **Two resources bind, and `resolve_tilt_workers` returns both.** Memory caps
+    the worker count (one in-flight tilt reaches ~1 GB on a 171 km domain at
+    250 m, so `n_jobs=-1` resolves to 14 workers at 2 km and 8 at 250 m); the core
+    budget caps the BLAS/FFT threads each worker may use. Missing the second is
+    worse than staying serial: NumPy and SciPy each start a pool sized to the whole
+    machine, so 14 workers × ~14 threads drove the load average past 500 on a
+    14-core machine and had to be killed. `workers * blas_threads` is now bounded by
+    the core count, applied with `threadpoolctl` inside the pool.
+  - Measured on a 15-tilt volume, 60 km domain at 1 km, dense engine and direct
+    solver: **3.1x at `n_jobs=8`** (17.5 s serial → 5.7 s). Task parallelism beats
+    BLAS threading — the fastest setting gives each worker a *single* thread,
+    because the azimuth solve is a few hundred rows and too small for a wide GEMM
+    to pay for its synchronisation.
+  - `threadpoolctl` is a new optional dependency (`pip install radar-palette[parallel]`).
+    The serial default never touches the native pools, so it is not required;
+    without it the parallel path is still correct but over-subscribes, and warns.
+  - Tests assert the parallel and serial grids are *bit-identical* (any difference
+    would be a race, not a tolerable reordering) and that the cone stack stays in
+    ascending-elevation order regardless of completion order.
+- `resolve_tilt_workers` is exported from `radar_palette.gridding`.
+
+- `radar_palette.gridding.nufft_engines`: interchangeable backends for the azimuth
+  NUFFT, and interchangeable solvers on top of them. `nufft.py` is unchanged and
+  remains the reference every engine is measured against; `make_operator(...,
+  engine=...)` selects who computes the transforms and `solve(..., solver=...)`
+  how the normal equations are solved. The evaluator exposes both as `az_engine`
+  and `az_solver`, and records which pair ran in its report.
+  - Engines: `reference` (`nufft.py` itself), `scipy` (default), `dense`,
+    `finufft`, `ducc0`, `torch`. Availability is checked at construction, never at
+    import, so a minimal install keeps working and asking for an absent engine
+    raises a message naming the extra to install rather than an `ImportError`.
+  - The default engine needs **no new dependency** and is the reference algorithm
+    with two exact substitutions: the Kaiser-Bessel spreading stencil becomes one
+    CSR matrix (replacing `np.add.at`, an unbuffered scatter that was 38% of solve
+    time) and the spread-to-spectrum transform becomes `rfft` (the spread field is
+    real, so the reference computed a conjugate-symmetric half it then discarded).
+    Both are arithmetic-preserving: agreement with `nufft.py` is 1.5e-15. Measured
+    speedup on the CG path is 1.9-2.3x for sweeps of 360 rays and up.
+  - The `dense` engine has no interpolation kernel at all — it forms the DFT
+    matrix. That is affordable here, and only here, because on the azimuth axis
+    the matrix is `n_rays x n_modes` and both are ray counts (8 MB at 720 rays).
+    It is therefore exact to round-off, needs no dependency, and is the fastest
+    engine measured on 360-720 ray sweeps (32-44x with the direct solver). Which
+    engine leads is *not* monotone in ray count: `finufft` is faster at both ends
+    of the tested range — at 1440 rays for the `O(n log n)` versus `O(n^2)`
+    reason, and at 120 rays because the problem is too small for the dense
+    per-solve BLAS work to amortise the matrix it built. Operational 1° and 0.5°
+    volumes sit in the band where `dense` wins; measure rather than extrapolate.
+  - `solver='direct'` factorises the normal equations instead of iterating on
+    them, reaching the least-squares solution CG approaches (verified against
+    CG run to 1e-14). It is 10-30x faster than 12 CG iterations, against about 2x
+    for the fastest engine change — the solver is the larger of the two effects.
+  - **The accuracy gain belongs to the engine/solver pair, not to the solver.**
+    On a field exactly band-limited on the lattice, so the correct answer is known
+    in closed form: `direct` on `dense` or `finufft` recovers it to ~1e-10 against
+    ~3e-5 for 12 CG iterations, but `direct` on a Kaiser-Bessel engine converges
+    to that engine's own ~3e-4 kernel error and gains nothing at low jitter. A
+    test asserts each half of that, because a reader who took the headline figure
+    for a property of `solver='direct'` alone would be wrong.
+  - **That accuracy gain does not transfer to real reflectivity, and the module
+    now says so in a warning.** Validated by held-out ray prediction on three
+    storm-filled sweeps (SPOL S-band convective line, SWX C-band widespread
+    precipitation, CSAPR2 C-band convective): at its best ridge the direct solve
+    is *comparable* to 12 CG iterations — 6.70 dB against 7.80, 4.74 against
+    4.92, 8.52 against 8.47 — not orders better. The synthetic figure was a
+    statement about representing a field this operator can represent exactly;
+    real reflectivity is not such a field. On real data the reasons to choose the
+    direct solver are speed and having no iteration count to tune.
+  - **`ridge='auto'` is an improvement on the old default, not the per-sweep
+    optimum, and on a well-conditioned sweep it does nothing at all.** Validated
+    further on a 15-tilt ARM BNF C-SAPR2 volume: at 4.5-42° the normal matrix is
+    well behaved (condition number 15-32) so the condition-number term never
+    binds and `auto` returns the floor — yet the held-out optimum on echo gates
+    is 1e-3..1e-2 at *every* tilt. Conditioning is a correlate of the quantity
+    that matters (out-of-band energy), not that quantity, and on a clean geometry
+    the correlation fails in the unsafe direction. Two fixes were tried and both
+    reverted, with the reasoning recorded at `MIN_RIDGE`: raising the floor to
+    1e-2 wins 0.12 dB on real data but gives up eight orders of magnitude on a
+    band-limited field, and generalised cross-validation recovers the synthetic
+    case exactly then fails on real sweeps because it scores on training residual
+    — which is what overfitting minimises (it returns the 1e-10 floor on four of
+    five BNF tilts whose measured optima are 1e-3..1e-2). **For real reflectivity pass
+    `ridge=1e-2` explicitly** (that is what `DEFAULT_RIDGE` is); `--real`
+    measures it for a given radar.
+  - **Stratify by echo before reading any dB figure.** Over half the gates in a
+    real sweep sit below 0 dBZ, so an unstratified median is dominated by noise
+    and by the gap-fill floor — and it ranks the solvers differently. On BNF
+    sweep 11 a ridge of 1e-1 scores best on all gates (4.14 dB) and worst on
+    gates above 10 dBZ (8.09 dB). `--real` now reports both columns.
+  - Across eight real sweeps (three single-sweep files plus five BNF tilts),
+    graded on echo gates with a per-sweep oracle ridge, the direct solve beats
+    12 CG iterations on 6 of 8 by a mean of 0.13 dB — a wash, consistent with the
+    single-sweep result and not the orders-of-magnitude the synthetic figures
+    suggest.
+  - `evaluate_lattice(lattice_values, azimuths_deg)` evaluates the recovered
+    interpolant at arbitrary azimuths. Needed because `forward` only evaluates at
+    the *measured* rays, which cannot distinguish fitting from overfitting; it is
+    a module function rather than an engine method because the interpolant
+    belongs to the lattice, not to whichever engine recovered it. The `reference`
+    engine also gains the `mode_low` attribute every other engine already had —
+    without it that engine alone failed on this path.
+  - What `direct` improves on *every* engine is degraded sampling, where what
+    fails is the conditioning rather than the kernel: at ±0.45-spacing jitter,
+    12 iterations reach 1.7e-2 against 4.5e-4 for the direct solve on the same
+    transforms. Its `ridge` is likewise not cosmetic — a sector's normal matrix is
+    singular by construction (a 30-120° sector at 1° spacing fits 91 rays onto a
+    366-point lattice) and a bare Cholesky fails on it.
+  - **`ridge` defaults to `'auto'`, derived from the eigenvalue spectrum**, because
+    no constant serves both regimes: a synthetic band-limited sweep wants the
+    1e-10 floor and every real sweep measured wants 1e-3 or larger, and 1e-10 is
+    the *worst* value tested on all three real sweeps. Note the driver is not rank
+    deficiency — two of the three are full-rank and still want a large ridge — but
+    that real reflectivity is not band-limited: speckle, clutter and echo edges
+    put energy in modes the sweep cannot determine, a small ridge fits that energy
+    at the measured rays, and the interpolant between them is noise. A
+    parametrised test adds broadband noise to a synthetic field and shows the
+    optimum leave the floor, isolating band-limitedness as the variable.
+  - The report gains `normal_null_dim`, the number of undetermined modes in the
+    geometry, since a caller cannot tell an under-determined answer from a
+    converged one by looking at the values. Real sweeps are commonly
+    rank-deficient: operational azimuth sampling leaves gaps of ~2× the nominal
+    spacing (measured: 3 undetermined modes of 414 on SPOL, 23 of 993 on a GUC
+    X-band sweep).
+  - `benchmarks/bench_nufft_engines.py --real` reproduces the held-out ray
+    validation on real sweeps, downloading them via `open-radar-data`.
+  - `benchmarks/bench_nufft_engines.py` regenerates every figure quoted above.
+    Timings are hardware-dependent and the quoted ones are from an arm64 laptop.
+
+### Changed
+
+- The evaluator's `NON_UNIFORM` path now runs on the `scipy` engine rather than
+  `nufft.py` directly, which is ~2x faster and agrees to round-off (1e-13 measured
+  end-to-end on the evaluated field, asserted by a test). `az_engine='reference'`
+  restores the original code path exactly. Note that the other engines are *not*
+  round-off equivalent: `dense`, `finufft`, `ducc0` and `torch` each shift the
+  answer by ~5e-4, since they replace the reference's Kaiser-Bessel kernel (whose
+  own error is 2.5e-4) with a different or exact transform. The shift is towards
+  exact arithmetic, but it is a shift.
+- The NUFFT path's report `extras` now include `engine` and `solver`, and the
+  kernel-parameter keys are supplied by the engine. `finufft`/`ducc0` report `eps`
+  in place of `kb_beta`/`M_oversampled`, since a kernel width is not what sets
+  their accuracy. `adjoint_test_rel` is measured per engine, not inherited.
+- `az_solver` is validated in the constructor rather than where it is consumed.
+  Only one of the three azimuth paths reads it, so a typo would otherwise pass
+  silently on a uniform sweep and fail later on a jittered one.
 
 - The `gridding` module docstring no longer claims the distance-weighted path "degrades
   gracefully where sampling is poor". It does not: the radius of influence is a fixed

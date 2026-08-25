@@ -60,8 +60,22 @@ dependencies = [
 # Optical-flow motion estimation for radar_palette.advection.
 advection = ["scikit-image>=0.22"]
 # Non-uniform FFTs for radar_palette.gridding on non-uniform sweep geometries.
+# All three below are alternative *engines* for the same operator, selected at
+# call time by radar_palette.gridding.nufft_engines. None of them is required:
+# the default engine uses only numpy/scipy and reproduces the reference
+# implementation to round-off. Install one to trade a dependency for speed
+# (finufft, ducc0) or for GPU execution (torch).
 spectral = ["finufft>=2.2"]
-all = ["radar-palette[advection,spectral]"]
+# Thread-pool control for n_jobs>1 in radar_palette.gridding.cones. Optional
+# because the serial default never touches the native pools; without it the
+# parallel path still gives correct output but over-subscribes the CPU, so it
+# warns rather than failing.
+parallel = ["threadpoolctl>=3.0"]
+spectral-ducc = ["ducc0>=0.33"]
+spectral-torch = ["torch>=2.0", "torchkbnufft>=1.4"]
+all = ["radar-palette[advection,spectral,parallel]"]
+# Every optional engine, for benchmarking and for the engine-equivalence tests.
+engines = ["radar-palette[spectral,spectral-ducc,spectral-torch,parallel]"]
 test = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
