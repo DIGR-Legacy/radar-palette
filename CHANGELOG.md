@@ -6,6 +6,25 @@ git tags via `setuptools-scm`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Split-cut selection was not reproducible across processes.** `census_sweep` fell
+  back to `next(iter(radar.fields))` when no `valid_field` was named, and Py-ART builds
+  its field dict from a set, so under hash randomisation the first key differs between
+  runs of the same file. On a NEXRAD split cut the choice decides everything:
+  `reflectivity` reaches ~460 km while `velocity` stops at ~2 km, so
+  `range_max_valid_m` flipped and `dedup_sweeps` kept the Doppler member instead of
+  the surveillance one. Measured on a KLOT VCP-212 volume with six SAILS repeats at
+  0.48 deg, the gridded peak alternated between 67.6 and 86.9 dBZ across identical
+  runs -- 9 of 20 fresh processes took the wrong sweep. Now resolved through
+  `VALID_FIELD_PREFERENCE`, a reflectivity-first list with a sorted fallback, so the
+  answer never depends on dict ordering. Nine consecutive fresh processes now agree
+  bit-for-bit where before they did not.
+
+  This did not affect the C-SAPR2 results in this changelog: that scan strategy has no
+  split cuts, so every elevation has exactly one member and the group has nothing to
+  choose between.
+
 ### Changed
 
 - **The spectral azimuth path now defaults to `az_engine='dense'`, `az_solver='direct'`.**
